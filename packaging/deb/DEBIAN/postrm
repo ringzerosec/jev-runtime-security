@@ -1,0 +1,63 @@
+#!/bin/bash
+# Post-remove: clean up runtime state; preserve config on remove, purge on purge
+set -e
+
+case "$1" in
+  remove)
+    # Remove runtime state (sockets, PID files) but keep config and data
+    rm -rf /var/run/ringzero 2>/dev/null || true
+    # Remove bash completion
+    rm -f /etc/bash_completion.d/rz 2>/dev/null || true
+    # Remove desktop entry
+    rm -f /usr/share/applications/ringzero-security.desktop 2>/dev/null || true
+    rm -f /usr/share/icons/hicolor/128x128/apps/ringzero-security.png 2>/dev/null || true
+    gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
+    # Remove systemd unit files
+    rm -f /etc/systemd/system/ringzero-daemon.service 2>/dev/null || true
+    rm -rf /etc/systemd/system/ringzero-daemon.service.d 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    ;;
+  purge)
+    # Full cleanup: remove everything including config, data, and keys
+    rm -rf /var/run/ringzero 2>/dev/null || true
+    rm -rf /var/lib/ringzero 2>/dev/null || true
+    rm -rf /var/log/ringzero 2>/dev/null || true
+    rm -rf /etc/ringzero 2>/dev/null || true
+    rm -rf /usr/lib/ringzero 2>/dev/null || true
+    rm -rf /usr/share/ringzero 2>/dev/null || true
+    rm -f /etc/bash_completion.d/rz 2>/dev/null || true
+    rm -f /usr/share/applications/ringzero-security.desktop 2>/dev/null || true
+    rm -f /usr/share/icons/hicolor/128x128/apps/ringzero-security.png 2>/dev/null || true
+    gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
+    rm -f /etc/systemd/system/ringzero-daemon.service 2>/dev/null || true
+    rm -rf /etc/systemd/system/ringzero-daemon.service.d 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    # Remove GRUB changes on purge.
+    GRUB_FILE="/etc/default/grub"
+    if [ -f "$GRUB_FILE" ]; then
+      if [ -f "${GRUB_FILE}.ringzero-backup" ]; then
+        # Preferred path: restore the pre-install backup. This is the only way
+        # to guarantee we don't leave behind a malformed lsm= list if the user
+        # has edited the file since install.
+        mv "${GRUB_FILE}.ringzero-backup" "$GRUB_FILE"
+        echo "[+] Restored $GRUB_FILE from pre-install backup"
+      else
+        # Fall back to in-place strip if the backup is missing.
+        if grep -qE '\blsm=[^ ]*\bbpf\b' "$GRUB_FILE"; then
+          sed -i -E 's/,bpf\b//g' "$GRUB_FILE"
+          # If we authored the entire lsm= line, strip it.
+          sed -i -E 's/ lsm=landlock,lockdown,yama,integrity,apparmor( |")/\1/g' "$GRUB_FILE"
+          echo "[!] No pre-install GRUB backup; stripped bpf from lsm= in place"
+        fi
+      fi
+      # Remove our marker line if present.
+      sed -i '/^# ringzero-managed-grub/d' "$GRUB_FILE"
+      if command -v update-grub &>/dev/null; then
+        update-grub 2>/dev/null || true
+      elif command -v grub-mkconfig &>/dev/null; then
+        grub-mkconfig -o /boot/grub/grub.cfg 2>/dev/null || true
+      fi
+      echo "[+] GRUB regenerated (reboot to take effect)"
+    fi
+    ;;
+esac

@@ -1,0 +1,96 @@
+Ring Zero — ringzero. Copyright (c) 2026 Ring Zero Security.
+
+This product includes software developed by Ring Zero Security.
+
+Licensing in this repository is split:
+
+  * Everything outside GPL/ is licensed under the Apache License, Version 2.0.
+    See LICENSE.
+  * The contents of GPL/ are licensed under GPL-2.0. See GPL/LICENSE. Linux
+    refuses to load a BPF LSM program unless it declares a GPL-compatible
+    license, so the kernel-side code cannot be Apache-2.0.
+
+--------------------------------------------------------------------------------
+Credit
+--------------------------------------------------------------------------------
+
+The classifier approach is inspired by TypeSafe's Jev (System One). We are not
+affiliated with TypeSafe. We train our own models.
+
+The checks layer includes an optional-to-enable provider that calls TypeSafe's
+hosted Jev API (https://api.typesafe.ai). It is a network call to a commercial
+third-party service, made only when an operator enables the checks layer and
+supplies their own API key. No TypeSafe code and no model weights are bundled
+in this repository. The local deterministic scorers in checks/ are what run
+when that provider is unselected or unavailable.
+
+--------------------------------------------------------------------------------
+Third-party code included in this repository
+--------------------------------------------------------------------------------
+
+1. NVIDIA SkillSpector — Apache License 2.0
+   https://github.com/NVIDIA/SkillSpector
+
+   The static pattern definitions in agent/src/scanner/patterns/ are ported
+   from SkillSpector's Python pattern modules, including:
+     static_patterns_data_exfiltration.py    -> data_exfiltration.rs
+     static_patterns_excessive_agency.py     -> excessive_agency.rs
+     static_patterns_memory_poisoning.py     -> memory_poisoning.rs
+     static_patterns_prompt_injection.py     -> prompt_injection.rs
+     static_patterns_system_prompt_leakage.py-> system_prompt_leakage.rs
+     static_patterns_tool_misuse.py          -> tool_misuse.rs
+     pattern_defaults.py                     -> mcp_tool_poisoning.rs, models.rs
+
+   Copyright (c) NVIDIA Corporation.
+
+   Licensed under the Apache License, Version 2.0 (the "License"); you may not
+   use these files except in compliance with the License. You may obtain a copy
+   of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+   WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+   License for the specific language governing permissions and limitations
+   under the License.
+
+   There is no affiliation with, or endorsement by, NVIDIA Corporation.
+
+2. Geist and Geist Mono — SIL Open Font License 1.1
+   https://github.com/vercel/geist-font
+
+   The desktop viewer bundles Geist and Geist Mono web font files under
+   app/ui/src/assets/fonts/, referenced from app/ui/src/styles/geist-fonts.css.
+
+   Copyright (c) 2023 Vercel, Inc.
+
+   These fonts are licensed under the SIL Open Font License, Version 1.1. The
+   license permits bundling and redistribution with software, requires that the
+   fonts remain under the OFL, and does not permit the Reserved Font Names to be
+   used for modified versions. A copy of the license is available at
+
+       https://openfontlicense.org/
+
+   There is no affiliation with, or endorsement by, Vercel, Inc.
+
+--------------------------------------------------------------------------------
+Third-party code REMOVED before publication
+--------------------------------------------------------------------------------
+
+3. Neo23x0/signature-base — Detection Rule License 1.1 (DRL-1.1)
+   https://github.com/Neo23x0/signature-base
+
+   An earlier revision of this tree carried YARA rules adapted from
+   signature-base. DRL-1.1 is not an OSI-approved open-source license, so those
+   rules were REMOVED rather than shipped inside an Apache-2.0 repository. No
+   signature-base-derived content remains.
+
+--------------------------------------------------------------------------------
+Notes on attribution found in source comments
+--------------------------------------------------------------------------------
+
+Some YARA-era rule comments referenced published threat research (for example
+CrowdStrike's analysis of agent attack surface). Those referenced ideas and
+public reporting, not code, and the files themselves have been removed. No
+third-party rule text remains in this repository.

@@ -1,0 +1,27 @@
+Package: ringzero-desktop
+Version: 0.1.0
+Section: admin
+Priority: optional
+Architecture: amd64
+Depends: ringzero-security (= 0.1.0), libwebkit2gtk-4.1-0, libgtk-3-0t64 | libgtk-3-0, libayatana-appindicator3-1, librsvg2-2
+Recommends: pkexec | policykit-1
+Maintainer: Ring Zero Security <abhijit@ringzerosecurity.com>
+Homepage: https://ringzerosecurity.com
+Vcs-Git: https://github.com/ringzerosec/jev-agentic-security
+Vcs-Browser: https://github.com/ringzerosec/jev-agentic-security
+Description: Ring Zero Security — desktop viewer
+ A desktop window over the local Ring Zero daemon: agent sessions, the event
+ timeline, detected threats, the review queue and daemon status.
+ .
+ The app holds a READ-ONLY API token, deliberately: an AI coding agent runs as
+ the same user, and a full-scope token within that user's reach would let the
+ agent turn enforcement off. Everything the window reads uses that token.
+ .
+ Changing enforcement does not. A write runs the equivalent `rz` command
+ through pkexec, so polkit asks an administrator to authenticate and the
+ command runs as root. An agent running as the developer cannot answer that
+ prompt, which is the line being drawn. Without pkexec installed the app says
+ so and names the `sudo rz ...` command to run instead.
+ .
+ Pulls in the GTK/WebKit stack, which is why it is a separate package: a
+ headless server installs ringzero-security alone and stays free of it.

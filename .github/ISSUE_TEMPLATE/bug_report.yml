@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Bug report
+description: Something does not work as described
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report security vulnerabilities here.
+        See [SECURITY.md](../blob/main/SECURITY.md) for how to report one privately.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got.
+    validations: { required: true }
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Output of `rz status`, plus `uname -a` and your distribution.
+      render: shell
+    validations: { required: true }
+  - type: textarea
+    id: logs
+    attributes:
+      label: Daemon log
+      description: "`journalctl -u ringzero-daemon -n 200 --no-pager`, with anything sensitive removed."
+      render: shell
+  - type: checkboxes
+    id: kernel
+    attributes:
+      label: Kernel prerequisites
+      options:
+        - label: "`/sys/kernel/btf/vmlinux` exists"
+        - label: "`bpf` is in the `lsm=` boot parameter (`cat /proc/cmdline`)"
+        - label: Kernel is 6.4 or later

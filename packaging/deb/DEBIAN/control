@@ -1,0 +1,30 @@
+Package: ringzero-security
+Version: 0.1.0
+Section: admin
+Priority: optional
+Architecture: amd64
+Depends: libc6, libgcc-s1
+Recommends: bpftool, linux-tools-generic, curl
+Maintainer: Ring Zero Security <abhijit@ringzerosecurity.com>
+Homepage: https://ringzerosecurity.com
+Vcs-Git: https://github.com/ringzerosec/jev-agentic-security
+Vcs-Browser: https://github.com/ringzerosec/jev-agentic-security
+Description: Ring Zero Security — kernel-level runtime security for AI coding agents
+ Ring Zero Security monitors and controls AI coding agent behavior at the OS
+ level. See what your AI tools access, block what they shouldn't. Enforcement
+ happens in the kernel via eBPF LSM hooks, underneath the agent process.
+ .
+ Features: credential access monitoring, sensitive file blocking,
+ DLP (data loss prevention), heuristic prompt injection detection,
+ TLS plaintext capture via eBPF uprobes, real-time event timeline,
+ intent-action causal tracing, session management, webhooks for external
+ detection systems, and the rz CLI.
+ .
+ The optional desktop viewer is a separate package, ringzero-desktop, so a
+ server does not pull in the GTK/WebKit stack.
+ .
+ Supported agents: Claude Code, ChatGPT, Gemini, Cursor, Copilot,
+ Codex, Devin, Windsurf, and any custom process you configure.
+ .
+ Kernel requirements: Linux 5.8+ with CONFIG_BPF_LSM=y and
+ CONFIG_DEBUG_INFO_BTF=y. The installer configures GRUB automatically.

@@ -1,0 +1,9 @@
+# Findings gitleaks reports that are not secrets, with the reason each is a
+# false positive. Format: <file>:<rule-id>:<line>
+#
+# Test fixtures in the webhook redaction tests. The value is a structurally
+# valid but fictional AWS key id, used to prove the redactor actually removes
+# secrets from a delivery. Deleting it would delete the test's evidence.
+agent/src/integrations/webhook.rs:aws-access-token:1403
+agent/src/integrations/webhook.rs:aws-access-token:1428
+agent/src/integrations/webhook.rs:aws-access-token:1430

@@ -1,0 +1,494 @@
+#!/bin/bash
+# Post-install: eBPF kernel setup, signing keys, services
+set -e
+
+BOLD="\033[1m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+RED="\033[31m"
+RESET="\033[0m"
+
+info()  { echo -e "${GREEN}[+]${RESET} $*"; }
+warn()  { echo -e "${YELLOW}[!]${RESET} $*"; }
+
+# ── 1. Directories ──────────────────────────────────────────────────────────
+
+# Tighten the config tree without touching secrets: a recursive chmod here
+# would widen key files to group-readable, and the daemon then refuses to use
+# them. Directories 0750, ordinary config 0640, anything ending .key stays 0600.
+chmod 0750 /etc/ringzero 2>/dev/null || true
+find /etc/ringzero -mindepth 1 -type d -exec chmod 0750 {} + 2>/dev/null || true
+find /etc/ringzero -mindepth 1 -type f ! -name '*.key' -exec chmod 0640 {} + 2>/dev/null || true
+find /etc/ringzero -mindepth 1 -type f -name '*.key' -exec chmod 0600 {} + 2>/dev/null || true
+chmod 0750 /var/log/ringzero 2>/dev/null || true
+
+info "Directories configured"
+
+# ── 2. eBPF signing keys ────────────────────────────────────────────────────
+# Generate a machine-local Ed25519 keypair for eBPF program signing.
+# The private key stays on this machine; the public key is used by the
+# daemon to verify eBPF objects at load time.
+
+KEYS_DIR="/etc/ringzero/keys"
+if [ ! -f "$KEYS_DIR/ebpf-signing.key" ]; then
+  mkdir -p "$KEYS_DIR"
+  chmod 0700 "$KEYS_DIR"
+
+  if command -v openssl &>/dev/null; then
+    openssl genpkey -algorithm Ed25519 -out "$KEYS_DIR/ebpf-signing.key" 2>/dev/null
+    openssl pkey -in "$KEYS_DIR/ebpf-signing.key" -pubout -out "$KEYS_DIR/ebpf-signing.pub" 2>/dev/null
+    chmod 0600 "$KEYS_DIR/ebpf-signing.key"
+    chmod 0644 "$KEYS_DIR/ebpf-signing.pub"
+    info "eBPF signing keypair generated"
+  else
+    warn "openssl not found — skipping eBPF signing key generation"
+    warn "Install openssl and run: dpkg --configure ringzero-security"
+  fi
+else
+  info "eBPF signing keys already exist — keeping"
+fi
+
+# ── 3. GRUB: enable BPF LSM permanently ─────────────────────────────────────
+# Linux kernels compiled with CONFIG_BPF_LSM=y still need "bpf" in the
+# lsm= boot parameter to activate it. We add it to GRUB_CMDLINE_LINUX
+# so it persists across kernel updates.
+
+NEEDS_REBOOT=0
+GRUB_FILE="/etc/default/grub"
+
+setup_bpf_lsm() {
+  if [ ! -f "$GRUB_FILE" ]; then
+    warn "No $GRUB_FILE found — skipping GRUB configuration"
+    warn "Manually add 'lsm=landlock,lockdown,yama,integrity,apparmor,bpf' to your bootloader"
+    return
+  fi
+
+  # Idempotency marker — if we already managed this file, don't touch it again.
+  # Without this, repeat reinstalls can double-append ',bpf' and slowly drift
+  # the cmdline (especially when the LSM list has been re-ordered by the user).
+  if grep -q '^# ringzero-managed-grub' "$GRUB_FILE"; then
+    info "GRUB already managed by ringzero (marker present) — skipping rewrite"
+    return
+  fi
+
+  # Read current GRUB_CMDLINE_LINUX (and DEFAULT, which Ubuntu typically uses).
+  CURRENT_CMDLINE=$(grep '^GRUB_CMDLINE_LINUX=' "$GRUB_FILE" | head -1 | sed -E 's/^GRUB_CMDLINE_LINUX="?(.*)"?$/\1/' | sed 's/"$//')
+  CURRENT_DEFAULT=$(grep '^GRUB_CMDLINE_LINUX_DEFAULT=' "$GRUB_FILE" | head -1 | sed -E 's/^GRUB_CMDLINE_LINUX_DEFAULT="?(.*)"?$/\1/' | sed 's/"$//')
+
+  combined_has_bpf() {
+    echo "$CURRENT_CMDLINE $CURRENT_DEFAULT" | grep -qE '\blsm=[^ ]*\bbpf\b'
+  }
+
+  if combined_has_bpf; then
+    info "BPF LSM already present in GRUB cmdline — adding marker only"
+  fi
+
+  if echo "$CURRENT_CMDLINE" | grep -qE '\blsm='; then
+    NEW_CMDLINE=$(echo "$CURRENT_CMDLINE" | sed -E 's/(\blsm=[^ "]*)/\1,bpf/')
+    # Collapse any duplicate ',bpf' tokens introduced by reruns.
+    NEW_CMDLINE=$(echo "$NEW_CMDLINE" | sed -E 's/(,bpf)(,bpf)+/\1/g')
+  elif echo "$CURRENT_DEFAULT" | grep -qE '\blsm='; then
+    # Ubuntu typically edits the _DEFAULT line; leave LINUX untouched and
+    # append bpf to DEFAULT instead.
+    NEW_CMDLINE="$CURRENT_CMDLINE"
+    CURRENT_DEFAULT=$(echo "$CURRENT_DEFAULT" | sed -E 's/(\blsm=[^ "]*)/\1,bpf/')
+    CURRENT_DEFAULT=$(echo "$CURRENT_DEFAULT" | sed -E 's/(,bpf)(,bpf)+/\1/g')
+  else
+    if [ -n "$CURRENT_CMDLINE" ]; then
+      NEW_CMDLINE="$CURRENT_CMDLINE lsm=landlock,lockdown,yama,integrity,apparmor,bpf"
+    else
+      NEW_CMDLINE="lsm=landlock,lockdown,yama,integrity,apparmor,bpf"
+    fi
+  fi
+
+  # Back up GRUB config once. Don't overwrite an existing backup — that's the
+  # last-known-good copy from before we ever touched the file.
+  if [ ! -f "${GRUB_FILE}.ringzero-backup" ]; then
+    cp "$GRUB_FILE" "${GRUB_FILE}.ringzero-backup"
+  fi
+
+  # Update GRUB_CMDLINE_LINUX
+  sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"$NEW_CMDLINE\"|" "$GRUB_FILE"
+  # And GRUB_CMDLINE_LINUX_DEFAULT if we rewrote it
+  if echo "$CURRENT_DEFAULT" | grep -qE '\blsm='; then
+    sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$CURRENT_DEFAULT\"|" "$GRUB_FILE"
+  fi
+
+  # Stamp a marker so future reinstalls don't re-edit.
+  if ! grep -q '^# ringzero-managed-grub' "$GRUB_FILE"; then
+    printf '\n# ringzero-managed-grub (do not remove this line if BPF LSM is set up)\n' >> "$GRUB_FILE"
+  fi
+
+  # Regenerate GRUB config
+  if command -v update-grub &>/dev/null; then
+    update-grub 2>/dev/null
+    info "GRUB updated — BPF LSM enabled (lsm=...bpf)"
+  elif command -v grub-mkconfig &>/dev/null; then
+    grub-mkconfig -o /boot/grub/grub.cfg 2>/dev/null
+    info "GRUB config regenerated — BPF LSM enabled"
+  elif command -v grub2-mkconfig &>/dev/null; then
+    grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null
+    info "GRUB2 config regenerated — BPF LSM enabled"
+  else
+    warn "Could not find update-grub or grub-mkconfig"
+    warn "Manually run: update-grub  (after verifying /etc/default/grub)"
+  fi
+
+  NEEDS_REBOOT=1
+}
+
+# Check if BPF LSM is already active in the running kernel
+if cat /sys/kernel/security/lsm 2>/dev/null | grep -q bpf; then
+  info "BPF LSM is active in the running kernel"
+else
+  warn "BPF LSM is not active in the running kernel"
+  setup_bpf_lsm
+  if [ "$NEEDS_REBOOT" -eq 0 ]; then
+    NEEDS_REBOOT=1  # still needs reboot even if GRUB update had issues
+  fi
+fi
+
+# ── 5. Bash completion ──────────────────────────────────────────────────────
+
+if [ -d /etc/bash_completion.d ]; then
+  cat > /etc/bash_completion.d/rz << 'EOF'
+_rz_completion() {
+  local cur prev words cword
+  _init_completion || return
+  local commands="status events policy threats diffs sessions escalations audit network enforcement file-access nhi shadow-ai scan session-events setup"
+  local policy_cmds="show block-domain set-mode"
+  local session_cmds="list create get terminate approve"
+  local escalation_cmds="list approve deny"
+  local audit_cmds="recent verify export"
+  local network_cmds="show set-mode set-enforce"
+  local enforcement_cmds="show set-default set-category"
+  local file_access_cmds="show add remove"
+  local scan_cmds="skills"
+  case $prev in
+    rz)          COMPREPLY=($(compgen -W "$commands" -- "$cur")) ;;
+    policy)      COMPREPLY=($(compgen -W "$policy_cmds" -- "$cur")) ;;
+    sessions)    COMPREPLY=($(compgen -W "$session_cmds" -- "$cur")) ;;
+    escalations) COMPREPLY=($(compgen -W "$escalation_cmds" -- "$cur")) ;;
+    audit)       COMPREPLY=($(compgen -W "$audit_cmds" -- "$cur")) ;;
+    network)     COMPREPLY=($(compgen -W "$network_cmds" -- "$cur")) ;;
+    enforcement) COMPREPLY=($(compgen -W "$enforcement_cmds" -- "$cur")) ;;
+    file-access) COMPREPLY=($(compgen -W "$file_access_cmds" -- "$cur")) ;;
+    scan)        COMPREPLY=($(compgen -W "$scan_cmds" -- "$cur")) ;;
+    set-mode)    COMPREPLY=($(compgen -W "low medium high" -- "$cur")) ;;
+    set-enforce) COMPREPLY=($(compgen -W "enforce observe" -- "$cur")) ;;
+    set-default) COMPREPLY=($(compgen -W "observe alert block" -- "$cur")) ;;
+  esac
+}
+complete -F _rz_completion rz
+EOF
+fi
+
+# ── 6. Systemd services ────────────────────────────────────────────────────
+
+# The daemon loads and attaches the eBPF programs itself — there is no
+# separate loader service.
+
+# dpkg passes "configure" on install/upgrade. Restarting unconditionally on
+# every reconfigure would clobber an operator's `systemctl stop`, so we only
+# (re)start on first install or if it's already running.
+DPKG_ACTION="${1:-configure}"
+
+# Embed the installing user's UID so the daemon's IPC socket peer-credential
+# check accepts the local UI / CLI. SUDO_UID is set by sudo; fall back to the
+# first non-system user if a packaging system does the install without sudo.
+OP_UID="${SUDO_UID:-}"
+if [ -z "$OP_UID" ]; then
+  OP_UID=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 { print $3; exit }')
+fi
+if [ -n "$OP_UID" ] && [ "$OP_UID" != "0" ]; then
+  mkdir -p /etc/systemd/system/ringzero-daemon.service.d
+  cat > /etc/systemd/system/ringzero-daemon.service.d/operator-uid.conf <<EOF
+[Service]
+Environment=RZ_OPERATOR_UID=${OP_UID}
+EOF
+  info "Embedded RZ_OPERATOR_UID=${OP_UID} for IPC peer-credential check"
+fi
+
+# ── 6b. Give the operator the READ-ONLY API token ────────────────────────────
+# The full-scope token stays root-only at /var/lib/ringzero/api-token. What the
+# operator gets is the read-only token, because an AI agent runs as the operator
+# and would otherwise be able to turn enforcement off with the credential we
+# handed it. Changing policy or enforcement needs `sudo rz ...`, which reads the
+# root token from /root/.config/ringzero/api-token.
+copy_api_token() {
+  local src="/var/lib/ringzero/api-token-readonly"
+  if [ -f "$src" ] && [ -n "$OP_UID" ] && [ "$OP_UID" != "0" ]; then
+    local op_home
+    op_home=$(getent passwd "$OP_UID" | cut -d: -f6)
+    if [ -n "$op_home" ]; then
+      local dest="$op_home/.config/ringzero"
+      # Never follow operator-placed symlinks while writing as root.
+      if [ -L "$op_home/.config" ] || [ -L "$dest" ] || [ -L "$dest/api-token" ]; then
+        warn "Skipping API token copy: $dest contains a symlink"
+        return
+      fi
+      mkdir -p "$dest"
+      # install(1) unlinks the destination before writing, so an existing file
+      # is replaced rather than written through.
+      install -m 0600 -o "$OP_UID" -g "$OP_UID" "$src" "$dest/api-token"
+      chown "$OP_UID":"$OP_UID" "$dest"
+    fi
+  fi
+}
+
+if command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
+  systemctl daemon-reload
+  systemctl enable ringzero-daemon
+
+  if [ "$DPKG_ACTION" = "configure" ]; then
+    # Start the daemon NOW, regardless of BPF LSM state. Without BPF LSM active
+    # it runs in DEGRADED mode (userspace only — no kernel eBPF enforcement until
+    # the reboot activates lsm=...bpf), but it is UP, so the desktop app and CLI
+    # work immediately instead of reporting "daemon not running". The daemon
+    # logs a warning and keeps running when the LSM hooks can't attach, and on
+    # reboot the (enabled) service restarts with full enforcement.
+    systemctl restart ringzero-daemon || true
+    sleep 1
+    copy_api_token
+    if cat /sys/kernel/security/lsm 2>/dev/null | grep -q bpf; then
+      info "ringzero-daemon started (eBPF enforcement active)"
+    else
+      warn "ringzero-daemon started in DEGRADED mode — kernel eBPF enforcement activates after reboot"
+    fi
+  fi
+else
+  warn "systemctl not found — the unit files were installed but no service was enabled"
+  warn "Start the daemon manually: /usr/bin/ringzero-daemon"
+fi
+
+# ── Done ─────────────────────────────────────────────────────────────────────
+
+echo ""
+echo -e "${BOLD}================================================================${RESET}"
+echo -e "${BOLD}  Ring Zero Security installed successfully!${RESET}"
+echo -e "${BOLD}================================================================${RESET}"
+echo ""
+
+if [ "$NEEDS_REBOOT" -eq 1 ]; then
+  echo -e "  ${YELLOW}REBOOT REQUIRED${RESET}"
+  echo ""
+  echo "  Ring Zero uses eBPF LSM for kernel-level AI agent monitoring."
+  echo "  The BPF LSM module has been added to your GRUB boot parameters"
+  echo "  but requires a reboot to activate."
+  echo ""
+  echo "  After reboot:"
+  echo "    - The daemon starts automatically via systemd"
+  echo "    - Check it:   rz status          (expect: Kernel driver: active)"
+  echo "    - Prove it:   bash /usr/share/ringzero/examples/boundary-demo.sh"
+  echo ""
+  echo -e "  ${BOLD}Please reboot now:${RESET}  sudo reboot"
+else
+  echo "  Quick start:"
+  echo "    rz status                           # daemon + kernel state"
+  echo "    rz events                           # live agent events"
+  echo "    rz review list                      # denials waiting for a human"
+  echo ""
+  echo "  Prove it on this machine:"
+  echo "    bash /usr/share/ringzero/examples/boundary-demo.sh"
+  echo "    bash /usr/share/ringzero/examples/seventeen-read-paths.sh"
+  echo ""
+  if [ -f /usr/bin/ringzero-app ]; then
+    echo "  Or open 'Ring Zero Security' from your application menu."
+    echo ""
+  fi
+fi
+
+echo "  Config:     /etc/ringzero/daemon.toml"
+echo "  Docs:       https://github.com/ringzerosec/jev-agentic-security"
+echo "  Uninstall:  sudo apt remove ringzero-security"
+echo ""
+
+# ── 7. Gateway auto-config ────────────────────────────────────────────────────
+# Install profile.d script so new shells route agent traffic through the gateway.
+# The daemon writes env vars to /etc/ringzero/gateway-env at runtime;
+# this script sources them on login.
+
+GATEWAY_PROFILE="/etc/profile.d/ringzero-gateway.sh"
+cat > "$GATEWAY_PROFILE" << 'GWEOF'
+#!/bin/sh
+# Ring Zero Security — route AI agent traffic through local gateway
+[ -f /etc/ringzero/gateway-env ] && set -a && . /etc/ringzero/gateway-env && set +a
+GWEOF
+chmod 0644 "$GATEWAY_PROFILE"
+
+# Also add to operator's bashrc/zshrc for non-login shells
+if [ -n "$OP_UID" ] && [ "$OP_UID" != "0" ]; then
+  op_home=$(getent passwd "$OP_UID" | cut -d: -f6)
+  if [ -n "$op_home" ]; then
+    MARKER="# Ring Zero Gateway"
+    for rc in "$op_home/.bashrc" "$op_home/.zshrc"; do
+      # Skip symlinked rc files: appending as root through a symlink would let
+      # the operator redirect the write to an arbitrary file.
+      if [ -f "$rc" ] && [ ! -L "$rc" ] && ! grep -q "$MARKER" "$rc"; then
+        printf '\n%s\n[ -f /etc/ringzero/gateway-env ] && set -a && . /etc/ringzero/gateway-env && set +a\n' "$MARKER" >> "$rc"
+        chown "$OP_UID":"$OP_UID" "$rc"
+      fi
+    done
+  fi
+fi
+info "Gateway profile script installed"
+
+# ── 7b. Ring Zero agent management skill ──────────────────────────────────────
+# Install the 'ringzero' skill into the operator's agent skills dir so an AI
+# agent (Claude Code, openclaw, …) can manage Ring Zero via the rz CLI. This is
+# the primary control path on headless servers that have no desktop app.
+if [ -n "$OP_UID" ] && [ "$OP_UID" != "0" ] && [ -d /usr/share/ringzero/skills/ringzero ]; then
+  op_home=$(getent passwd "$OP_UID" | cut -d: -f6)
+  if [ -n "$op_home" ]; then
+    skills_dest="$op_home/.claude/skills"
+    if [ -L "$op_home/.claude" ] || [ -L "$skills_dest" ] || [ -L "$skills_dest/ringzero" ]; then
+      warn "Skipping agent skill install: $skills_dest contains a symlink"
+    else
+    mkdir -p "$skills_dest"
+    cp -r --no-dereference /usr/share/ringzero/skills/ringzero "$skills_dest/"
+    chown -R "$OP_UID":"$OP_UID" "$skills_dest/ringzero"
+    # Fix ownership of any parent dirs we just created (non-recursive — don't
+    # touch the operator's existing ~/.claude contents).
+    chown "$OP_UID":"$OP_UID" "$skills_dest" "$op_home/.claude" 2>/dev/null || true
+    info "Ring Zero agent skill installed → $skills_dest/ringzero"
+    fi
+  fi
+fi
+
+# ── 8. Agent hook auto-config ─────────────────────────────────────────────────
+# Install hooks into Codex and Claude Code config so they push events to us.
+
+if [ -n "$OP_UID" ] && [ "$OP_UID" != "0" ]; then
+  op_home=$(getent passwd "$OP_UID" | cut -d: -f6)
+  if [ -n "$op_home" ]; then
+
+    # Codex hooks — add to ~/.codex/config.toml if not already there
+    CODEX_CONFIG="$op_home/.codex/config.toml"
+    if [ "${RZ_INSTALL_AGENT_HOOKS:-0}" = "1" ] \
+       && [ -d "$op_home/.codex" ] && [ ! -L "$op_home/.codex" ] && [ ! -L "$CODEX_CONFIG" ] \
+       && ! grep -q "rz-hook" "$CODEX_CONFIG" 2>/dev/null; then
+      cat >> "$CODEX_CONFIG" << 'CODEXHOOK'
+
+# Ring Zero Security — capture all agent events
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "/usr/bin/rz-hook"
+timeout = 5
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "/usr/bin/rz-hook"
+timeout = 5
+
+[[hooks.PreToolUse]]
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/usr/bin/rz-hook"
+timeout = 5
+
+[[hooks.PostToolUse]]
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "/usr/bin/rz-hook"
+timeout = 5
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/usr/bin/rz-hook"
+timeout = 5
+CODEXHOOK
+      chown "$OP_UID":"$OP_UID" "$CODEX_CONFIG"
+      info "Codex hooks installed"
+    fi
+
+    # Claude Code hooks. These go in ~/.claude/settings.json under "hooks",
+    # NOT in a hooks.json of our own, and each event holds MATCHER GROUPS whose
+    # own "hooks" array carries the commands. An earlier version of this script
+    # wrote the wrong file in the wrong shape and still printed success, so the
+    # hook never fired and nothing was ever scored. Merge into whatever the user
+    # already has rather than overwriting their settings.
+    # Agent hooks are OPT-IN. Syscalls and terminal capture need no cooperation
+    # from the harness, and a hook is configuration owned by the thing being
+    # watched: it can be absent, wrong, or edited by the agent itself. Editing
+    # another vendor's config on every install is also not ours to do quietly.
+    # Set RZ_INSTALL_AGENT_HOOKS=1 to opt in; the capability stays, the default
+    # does not depend on it.
+    CLAUDE_DIR="$op_home/.claude"
+    SETTINGS="$CLAUDE_DIR/settings.json"
+    # Earlier packages wrote this file; Claude Code never read it. Remove it so
+    # nobody inspects it later and concludes hooks are wired up.
+    if [ -f "$CLAUDE_DIR/hooks.json" ] && [ ! -L "$CLAUDE_DIR/hooks.json" ] \
+       && grep -q "rz-hook" "$CLAUDE_DIR/hooks.json" 2>/dev/null; then
+      rm -f "$CLAUDE_DIR/hooks.json"
+    fi
+    if [ "${RZ_INSTALL_AGENT_HOOKS:-0}" != "1" ]; then
+      info "Agent hooks not configured (optional — syscall and terminal capture do not need them)"
+      info "  To add pre-execution tool-call scoring: sudo RZ_INSTALL_AGENT_HOOKS=1 dpkg-reconfigure ringzero-security"
+    elif [ -d "$CLAUDE_DIR" ] && [ ! -L "$CLAUDE_DIR" ] && [ ! -L "$SETTINGS" ]; then
+      # `su` wants a NAME, not a uid: `su 1000` fails with "user 1000 does not
+      # exist", which is exactly how this broke the first time.
+      op_user=$(getent passwd "$OP_UID" | cut -d: -f1)
+      if command -v python3 >/dev/null 2>&1 && [ -n "$op_user" ]; then
+        if su -s /bin/sh -c "python3 - '$SETTINGS'" "$op_user" << 'PYHOOK'
+import json, sys, os, tempfile
+
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        settings = json.load(f)
+    if not isinstance(settings, dict):
+        raise ValueError("settings.json is not an object")
+except FileNotFoundError:
+    settings = {}
+except Exception as e:
+    # Never clobber a file we could not parse: the user's own configuration
+    # matters more than our hook.
+    print(f"leaving {path} alone: {e}", file=sys.stderr)
+    raise SystemExit(1)
+
+hooks = settings.setdefault("hooks", {})
+changed = False
+for event in ("PreToolUse", "PostToolUse"):
+    groups = hooks.setdefault(event, [])
+    if not isinstance(groups, list):
+        print(f"leaving {path} alone: hooks.{event} is not a list", file=sys.stderr)
+        raise SystemExit(1)
+    if any("rz-hook" in json.dumps(g) for g in groups):
+        continue
+    groups.append({
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": "/usr/bin/rz-hook", "timeout": 5}],
+    })
+    changed = True
+
+if not changed:
+    raise SystemExit(2)
+
+os.makedirs(os.path.dirname(path), exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+os.replace(tmp, path)
+PYHOOK
+        then
+          info "Claude Code hooks installed (~/.claude/settings.json)"
+        else
+          rc=$?
+          if [ "$rc" = "2" ]; then
+            info "Claude Code hooks already present"
+          else
+            warn "Could not configure Claude Code hooks — tool calls will not be scored."
+            warn "Add /usr/bin/rz-hook as a PreToolUse hook in ~/.claude/settings.json by hand."
+          fi
+        fi
+      else
+        warn "python3 missing or operator user unresolved — skipping Claude Code hook setup."
+        warn "Add /usr/bin/rz-hook as a PreToolUse hook in ~/.claude/settings.json by hand."
+      fi
+    fi
+  fi
+fi

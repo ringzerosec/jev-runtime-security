@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name    = "ringzero-checks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic scorers that label what an agent is trying to do. Never in the syscall path."
+
+[features]
+# The real HTTP transport for the optional Jev provider. Off unless the agent
+# turns it on, so the checks crate builds with no network stack by default.
+http = ["dep:reqwest"]
+
+[dependencies]
+reqwest              = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false, optional = true }
+serde.workspace      = true
+serde_json.workspace = true
+regex.workspace      = true
+once_cell.workspace  = true

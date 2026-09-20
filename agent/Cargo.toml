@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name    = "agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ringzero-daemon"
+path = "src/main.rs"
+
+[features]
+# On-device "security brain" inference via the LiteRT-LM Rust binding. Heavy
+# C++ build (bazel/cmake) + a fine-tuned .litertlm model, so it's opt-in. The
+# default build compiles a stub that fails closed; enable once the model exists:
+#   cargo build --release -p daemon --features edge-llm
+# When wiring, add the litert-lm crate (pinned by git SHA) as an optional dep
+# here:  edge-llm = ["dep:litert-lm"]
+edge-llm = []
+
+[dependencies]
+ringzero-checks              = { path = "../checks", features = ["http"] }
+tokio.workspace              = true
+serde.workspace              = true
+serde_json.workspace         = true
+toml.workspace               = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true
+anyhow.workspace             = true
+thiserror.workspace          = true
+keyring.workspace            = true
+blake3.workspace             = true
+sha2.workspace              = true
+hmac                         = "0.12"
+url                          = "2"
+regex.workspace              = true
+notify.workspace             = true
+yara-x.workspace             = true
+sled.workspace               = true
+uuid.workspace               = true
+chrono.workspace             = true
+walkdir.workspace            = true
+once_cell.workspace          = true
+nix.workspace                = true
+axum                         = "0.7"
+tower                        = "0.4"
+tower-http                   = { version = "0.5", features = ["cors", "fs", "set-header"] }
+reqwest                      = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+jsonwebtoken                 = "9"
+dirs-next                    = "2"
+petgraph                     = "0.8"
+base64                       = "0.22"
+rcgen                        = { version = "0.13", features = ["crypto"] }
+time                         = "0.3"
+
+# rustls crypto provider (used by reqwest rustls-tls)
+rustls              = { version = "0.23", features = ["ring"] }
+# Forward HTTPS inspection proxy (fallback when the gateway is disabled)
+tokio-rustls        = { version = "0.26", default-features = false, features = ["ring"] }
+rustls-pemfile      = "2"
+rustls-native-certs = "0.8"
+
+# Pattern hot-reload (Ed25519 signature verification)
+ed25519-dalek       = { version = "2", features = ["pkcs8"] }
+
+# Kernel side: eBPF loader + raw syscalls
+aya    = { version = "0.12" }
+libc   = "0.2"
+flate2 = "1.0"
+brotli = "7"

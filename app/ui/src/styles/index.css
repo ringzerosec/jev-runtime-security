@@ -1,0 +1,130 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Self-hosted Geist fonts (woff2 bundled under src/assets/fonts). Was a remote
+   @import from fonts.googleapis.com — that request is RENDER-BLOCKING, so on a
+   machine with slow/filtered internet (VMs, air-gapped installs) WebKit blocked
+   first paint until the request timed out (~29s of blank white screen). Self-
+   hosting makes the app render instantly offline, and stops a security product
+   from phoning Google Fonts on every launch. */
+@import url('./geist-fonts.css');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: #fafafa;
+    --foreground: #0a0a0a;
+    --card: #ffffff;
+    --card-foreground: #0a0a0a;
+    --popover: #ffffff;
+    --popover-foreground: #0a0a0a;
+    --primary: #01696f;
+    --primary-foreground: #ffffff;
+    --secondary: #f5f5f5;
+    --secondary-foreground: #0a0a0a;
+    --muted: #f5f5f5;
+    --muted-foreground: #6b7280;
+    --accent: #f5f5f5;
+    --accent-foreground: #0a0a0a;
+    --destructive: #dc2626;
+    --destructive-foreground: #ffffff;
+    --border: #e5e5e5;
+    --input: #e5e5e5;
+    --ring: #01696f;
+    --sidebar: #ffffff;
+    --sidebar-foreground: #0a0a0a;
+    --sidebar-primary: #01696f;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: rgba(1, 105, 111, 0.04);
+    --sidebar-accent-foreground: #0a0a0a;
+    --sidebar-border: #e5e5e5;
+    --sidebar-ring: #01696f;
+    --radius: 0.625rem;
+    --spacing: 0.25rem;
+
+    /* Semantic event colors */
+    --event-allow: #16a34a;
+    --event-allow-bg: #dcfce7;
+    --event-allow-text: #15803d;
+    --event-pii: #d97706;
+    --event-pii-bg: #fef3c7;
+    --event-pii-text: #92400e;
+    --event-block: #dc2626;
+    --event-block-bg: #fee2e2;
+    --event-block-text: #991b1b;
+    --event-injection: #9333ea;
+    --event-injection-bg: #f3e8ff;
+    --event-injection-text: #6b21a8;
+    --event-muted: #6b7280;
+    --event-muted-bg: #f5f5f5;
+
+    /* Brand shades */
+    --teal: #01696f;
+    --teal-dark: #0c4e54;
+    --teal-light: #bce2e7;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family:
+      'Geist', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  }
+  code,
+  pre,
+  .font-mono {
+    font-family: 'Geist Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  }
+}
+
+/* Sleek scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+/* Glow effects */
+.glow-teal {
+  box-shadow:
+    0 0 20px rgba(1, 105, 111, 0.15),
+    0 0 60px rgba(1, 105, 111, 0.05);
+}
+.glow-red {
+  box-shadow:
+    0 0 20px rgba(220, 38, 38, 0.15),
+    0 0 60px rgba(220, 38, 38, 0.05);
+}
+.glow-amber {
+  box-shadow:
+    0 0 20px rgba(217, 119, 6, 0.15),
+    0 0 60px rgba(217, 119, 6, 0.05);
+}
+
+/* Pulse animation for live indicators */
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+.animate-pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}

@@ -1,0 +1,418 @@
+# SPDX-License-Identifier: Apache-2.0
+# Ring Zero Security — Daemon Configuration
+# /etc/ringzero/daemon.toml
+#
+# Reload at runtime: sudo systemctl kill -s HUP ringzero-daemon
+# Switch between observe and enforce: change mode below and reload.
+#
+# Privacy: nothing leaves this machine unless you enable it here. The SIEM
+# forwarder, cloud sync, pattern reload, updater and crash reporting are all
+# off by default; the [webhooks] section (see docs/integrations.md) only sends
+# to endpoints you configure.
+
+# ── Daemon ───────────────────────────────────────────────────────────────────
+[daemon]
+log_level = "info"
+# observe: monitor and log only
+# enforce: block according to the kernel policy maps (protected files, ACL)
+mode = "enforce"
+# socket_path = "/var/run/ringzero/daemon.sock"
+
+# ── Local HTTP API (127.0.0.1 only) ──────────────────────────────────────────
+# Used by the desktop app, the rz CLI and rz-hook. Bearer-token authenticated;
+# the daemon writes the token to /var/lib/ringzero/api-token (root, 0600).
+[http_api]
+enabled = true
+bind    = "127.0.0.1:7700"
+# tls_cert = "/etc/ringzero/certs/daemon.crt"
+# tls_key  = "/etc/ringzero/certs/daemon.key"
+
+# ── DLP (Data Loss Prevention) ────────────────────────────────────────────────
+# Context-aware key routing across the enforcement layers:
+#   1. eBPF kernel: taint-tracks processes that read credential files
+#   2. Event loop: inspects NetworkConnect/Send events from the kernel and
+#      pushes block decisions back to the eBPF maps
+#   3. TLS plaintext capture (SSL uprobes): matches API key patterns against
+#      provider domains
+#   4. IPC/API: runtime key route management (add/remove routes live)
+#
+# Built-in provider detection (no config needed):
+#   OpenAI (sk-*)         → api.openai.com
+#   Anthropic (sk-ant-*)  → api.anthropic.com
+#   AWS (AKIA*)           → *.amazonaws.com
+#   GitHub (ghp_*/ghs_*)  → api.github.com
+#   Slack (xox*)          → *.slack.com
+#   Stripe (sk_live_*)    → api.stripe.com
+#   Google (AIza*)        → *.googleapis.com
+#
+# Changes take effect on SIGHUP reload:
+#   sudo systemctl kill -s HUP ringzero-daemon
+[dlp]
+enabled = true
+# Block keys going to the wrong provider (false = warn/log only)
+enforce = true
+
+# Custom key routes — for keys not auto-detected by pattern.
+# Reads the env var at daemon startup to learn the key value.
+# key_routes = [
+#   { env_var = "CUSTOM_API_KEY", destination = "api.example.com" },
+# ]
+key_routes = []
+
+[dlp.pii]
+ssn         = true
+credit_card = true
+email       = true
+phone       = true
+ip_address  = false
+# block: record a blocked event and block-cache the (pid, destination) pair when
+#        PII is found in outbound traffic (no process termination in this release)
+# redact: allow it, mask the PII in the event log
+action      = "block"
+[enforcement]
+default_action = "observe"
+
+[enforcement.categories]
+credential_access     = "observe"
+data_exfiltration     = "observe"
+privilege_escalation  = "observe"
+prompt_injection      = "observe"
+supply_chain          = "observe"
+excessive_agency      = "observe"
+output_handling       = "observe"
+memory_poisoning      = "observe"
+tool_misuse           = "observe"
+rogue_agent           = "observe"
+system_prompt_leakage = "observe"
+mcp_tool_poisoning    = "observe"
+harmful_content       = "observe"
+
+# ── SIEM forwarder (off unless a target is configured) ───────────────────────
+[siem]
+# Splunk HTTP Event Collector
+# splunk_url   = "https://splunk.example.com:8088/services/collector/event"
+# splunk_token = ""
+# splunk_index = "ringzero"
+
+# Microsoft Sentinel (Log Analytics)
+# sentinel_workspace_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# sentinel_key          = ""
+
+# Elasticsearch
+# elasticsearch_url     = "https://es.example.com:9200"
+# elasticsearch_index   = "ringzero-events"
+# elasticsearch_api_key = ""
+
+# Syslog / CEF
+# syslog_host = "siem.example.com"
+# syslog_port = 514
+
+# ── Prompt Injection Detection ────────────────────────────────────────────────
+# Heuristic (local regex/pattern) scanning of skill files and, optionally,
+# live captured LLM traffic. Runs entirely on this machine.
+[model_armor]
+enabled            = true
+mode               = "heuristic"
+scan_live_traffic  = false    # also scan eBPF-captured traffic in real time (adds latency)
+enforce            = false    # block flagged requests (vs log-only)
+
+# ── Secondary LLM Analyzer (SLM) ────────────────────────────────────────────
+# Uses a language model to classify causal traces (LLM intent + kernel
+# actions). Off by default. "local" talks to an Ollama server on this machine;
+# "cloud" sends trace context to the Google Gemini API — only enable it if you
+# accept that.
+[slm]
+# mode: "off" | "local" (Ollama at 127.0.0.1:11434) | "cloud" (Gemini API)
+mode = "off"
+# model_path     = "gemma3:4b"          # Ollama model name for local mode
+# cloud_model    = "gemma-4-27b-it"     # Gemini model ID for cloud mode
+# gemini_api_key = ""                   # or set GEMINI_API_KEY env var
+context_window  = 20    # max events to include in analysis context
+score_threshold = 40    # minimum heuristic score before triggering SLM
+[osv]
+enabled = false
+
+# ── Detection webhooks (off until you add an endpoint or a hook) ─────────────
+# Full reference and an example receiver: docs/integrations.md
+#
+# Async event stream: every agent event (process exec, file access, network,
+# plus the daemon's own detections) is POSTed as JSON, HMAC-SHA256 signed with
+# `secret`, after the redaction rules below are applied. Best-effort delivery
+# through a local queue; never blocks enforcement.
+#
+# Sync verdict hooks: for the listed kernel event types the daemon waits up to
+# timeout_ms for {"verdict": "allow"|"deny"} before releasing the event.
+# fail_mode is REQUIRED ("open" = allow on timeout/error, "closed" = deny) —
+# the config refuses to load without it. Meant for endpoints on localhost or
+# the local network; remote systems should consume the async stream.
+[webhooks]
+queue_size = 10000
+
+# [[webhooks.endpoints]]
+# name        = "ml-scorer"
+# url         = "https://scoring.example.com/ringzero/events"
+# secret      = "replace-with-a-long-random-string"
+# event_types = ["*"]          # or e.g. ["process_exec", "file_open", "network_connect", "threat"]
+# timeout_ms  = 5000
+# retries     = 3
+
+# A local file sink instead of (or next to) HTTP: one JSON line per event,
+# appended to the file (created 0600, symlinks refused). With a secret each
+# line carries the same HMAC signature the HTTP delivery would.
+# [[webhooks.endpoints]]
+# name        = "audit-file"
+# url         = "file:///var/log/ringzero/events.jsonl"
+# secret      = "replace-with-a-long-random-string"
+# event_types = ["*"]
+
+# [[webhooks.verdict_hooks]]
+# name        = "policy-engine"
+# url         = "http://127.0.0.1:8081/verdict"
+# event_types = ["process_exec", "file_open", "network_connect"]
+# timeout_ms  = 250
+# fail_mode   = "open"         # REQUIRED: "open" | "closed"
+# secret      = "replace-with-a-long-random-string"
+
+[webhooks.redaction]
+enabled          = true
+builtin_patterns = true        # API keys, tokens, JWTs, private keys, key=value secrets
+patterns         = []          # extra regexes, e.g. ["(?i)internal-ticket-[0-9]+"]
+drop_fields      = []          # dotted paths to remove, e.g. ["args.cmdline", "args.llm_context"]
+replacement      = "[REDACTED]"
+
+# ── Checks ───────────────────────────────────────────────────────────────────
+# Checks score what an agent is ABOUT TO DO, from its harness hook events. They
+# run in userspace, off the syscall path, and they never allow or deny
+# anything: a result is written into the trace and joined to the kernel's real
+# decision by session id. The kernel never waits on a check.
+#
+# PRIVACY — READ THIS BEFORE SETTING enabled = true.
+# The default provider is "jev", a hosted third-party API run by TypeSafe.
+# While enabled = false (the default) nothing here leaves your machine. The
+# moment you set enabled = true with provider = "jev", each scored tool call
+# sends to https://api.typesafe.ai:
+#     the tool name, its arguments, the workspace path, the approved-host list,
+#     and a hash of the task
+# all passed through the [webhooks.redaction] redactor first. Raw prompt text is
+# never sent — the task travels as a hash. Secrets matched by the redactor are
+# masked before the request is built.
+#
+# To keep everything on this machine, set provider = "deterministic". That uses
+# local rule-based scorers: repeatable and auditable, but not calibrated
+# against labelled data.
+[checks]
+enabled = false
+
+# "jev" (default) or "deterministic".
+provider = "jev"
+
+# Let the agent's tool-call hook DENY a call, not just record it. OFF by
+# default; when off the hook is fire-and-forget and adds no latency.
+#
+# THE OPERATIONAL TRADE — read before enabling. With blocking on and the
+# default (network) provider, a provider outage or rate limit means one of two
+# things, and you must choose which:
+#   fail_mode = "closed"  the call is denied — your developers are blocked
+#   fail_mode = "open"    the call is allowed — that path is unprotected
+# There is no third option while the scorer is a network call, which is the
+# strongest argument for a local model. `base_url` under [checks.jev] is how you
+# move to one without a code change.
+#
+# The deterministic scorer runs first and gates the model call: a benign tool
+# call never makes a network request. Only a locally-flagged call is sent to the
+# model, and the model may only turn an allow into a deny, never the reverse.
+#
+# This layer is app-level and BYPASSABLE — an agent can write and run its own
+# binary (see examples/boundary-demo.sh). The kernel remains the only boundary
+# that holds; this hook is a convenience, not the enforcement point.
+blocking = false
+# Required when blocking = true. No default: "open" or "closed" (see above).
+# fail_mode = "closed"
+# How long the hook waits for a decision.
+timeout_ms = 1500
+# Remember a decision for an identical tool call this many seconds, so a loop
+# over one path does not pay per call.
+cache_ttl_secs = 30
+
+# The directory the agent is expected to work in. A write outside it is scored.
+# Unset means that check stays quiet.
+# workspace = "/home/dev/project"
+
+# Hosts approved for outbound tool calls. Anything else scores as unapproved.
+# approved_hosts = ["registry.npmjs.org", "pypi.org"]
+
+# ── What this layer judges by ────────────────────────────────────────────────
+# Every number the checks layer uses, in one place. The values below are the
+# defaults; delete the section entirely to keep them. A set that cannot mean
+# anything is refused at startup with the reason, rather than clamped quietly.
+#
+# Each is a probability between 0.0 and 1.0.
+[checks.thresholds]
+
+# Where the line falls between "this is a secret" and "this might be one", for
+# the number the model answers with. Raise secret_pattern_matched_at to make
+# the layer say "definitely" less often. Lower possible_secret_at to catch more
+# and see more noise. The first cannot be below the second.
+secret_pattern_matched_at = 0.85
+possible_secret_at        = 0.40
+
+# What the deterministic scorer says when a rule of each strength fires.
+# probability is the weight it gives the answer; confidence is how strongly the
+# evidence decided it. A stronger band may not score below a weaker one.
+#
+#   secret_pattern  a secret regex matched the text exactly — the most certain
+#                   thing this layer ever says
+#   strong_match    a credential path named in a tool call's arguments
+#   partial_match   a rule fired but the case is judgeable either way, such as
+#                   a write outside the stated workspace
+#   weak_match      a hint rather than a finding, such as an unapproved host
+#                   when no approved list was configured
+#   benign          nothing fired
+secret_pattern = { probability = 0.95, confidence = 0.90 }
+strong_match   = { probability = 0.90, confidence = 0.90 }
+partial_match  = { probability = 0.70, confidence = 0.80 }
+weak_match     = { probability = 0.50, confidence = 0.40 }
+benign         = { probability = 0.90, confidence = 0.60 }
+
+# A non-benign result at or above this goes to the review queue for a human to
+# label. Raising it means fewer items to work through and more missed. It
+# changes NOTHING about what the kernel enforces. It cannot be above
+# weak_match.probability, or a weak match could never reach the queue at all.
+flag_at = 0.40
+
+# Settings for the hosted provider. The API key is NEVER written in this file:
+# it is read from api_key_file, which must be mode 0600 and owned by root. If
+# checks are enabled with provider = "jev" and that file is missing, unreadable
+# or group/world-readable, the checks layer refuses to start and says so in the
+# log — it does not silently fall back to local scoring.
+[checks.jev]
+api_key_file = "/etc/ringzero/typesafe.key"
+model        = "jev-latest"
+timeout_ms   = 1500
+
+# Origin of the scoring service; the request path is always /v1/systemone.
+# Point this at your own endpoint when you have one — a self-hosted or
+# fine-tuned model that serves the same contract drops in by changing this one
+# line, with no code change.
+base_url     = "https://api.typesafe.ai"
+
+# ── Terminal capture ─────────────────────────────────────────────────────────
+#
+# READ THIS BEFORE LEAVING IT ON. Ring Zero reads the text an AI agent writes to
+# and reads from its terminal, captured in the kernel below the agent. That text
+# is whatever the agent printed, which CAN INCLUDE SECRETS it was legitimately
+# working with: a token it echoed, a config file it printed, a key in an error.
+#
+# What happens to it:
+#   - every fragment goes through [webhooks.redaction] before it is stored or
+#     scored, and the raw text is dropped at that point
+#   - it is stored in the local event timeline, on this machine
+#   - it leaves the machine ONLY if [checks] is enabled with a hosted provider
+#     AND the local deterministic scorer already flagged that fragment
+#   - if the redactor cannot be built, capture does not run at all
+#
+# Why it is on by default: agent hooks are opt-in, so on a normal install this
+# and the kernel event stream are what the checks layer has to work with.
+#
+# Turn it off for kernel enforcement with no terminal capture whatsoever.
+#
+# WHAT IT CANNOT SEE: matching is on the process name, so an agent whose binary
+# has been renamed is not captured.
+# ── Egress narrowing on taint ────────────────────────────────────────────────
+#
+# When a process ingests external content — a web fetch, a web search, an MCP
+# tool result — the transcript watcher (below) raises taint on it, and with this
+# on, the kernel refuses that process any connection off the allowlist. Loopback
+# and the resolved LLM API endpoints are always allowed, so the agent keeps
+# talking to its model; `allow` is your additions (host or IP).
+#
+# OFF by default: flipping socket_connect from observe to enforce is a
+# deliberate choice, exactly like quarantine. With it off, an off-allowlist
+# connection from a tainted process is recorded and allowed.
+[egress]
+enforce = false
+allow = []
+# Raise taint when an agent-tree process connects off the allowlist. This is the
+# PRIMARY signal that external content arrived: asked to read a web page, a real
+# Claude Code session ran `curl` through Bash rather than calling a fetch tool,
+# so matching tool names in the transcript saw nothing at all. Every route to
+# the network has to call connect(2), which the kernel already sees.
+#
+# OFF, AND IT MUST STAY OFF UNTIL ALLOWLISTING IS DNS-AWARE. Measured on a real
+# session that was told not to touch the network and only did local file work:
+# 18 processes tainted. The cause is not the rule, it is the allowlist. The
+# model API is behind a CDN; the daemon resolves api.anthropic.com once at boot
+# and the agent resolves it later and gets a different address (160.79.104.10
+# was not among the 42 the daemon held), so the agent's own calls to its own
+# model read as off-allowlist and taint it instantly. Turning this on today
+# taints every session within a second, which makes the signal meaningless.
+taint_on_egress = false
+
+# ── Transcript taint watcher ─────────────────────────────────────────────────
+#
+# Reads each agent's JSONL transcript incrementally and raises taint when a
+# record shows external content was ingested. It keys on PROVENANCE — the tool
+# the agent invoked (WebFetch, WebSearch, an mcp__ tool) — which is a
+# deterministic fact, never a judgment that the content is bad. It reads no file
+# content off the machine and stores nothing; it sets one kernel bit.
+#
+# It ships NARROW on purpose: web fetch, web search and MCP only. "A read of a
+# file outside the workspace" is a plausible fourth signal, left out until the
+# taint-explosion risk is measured, because it is the one most likely to taint
+# an ordinary coding session. The agent's own transcript and config never
+# trigger taint and are never write-scanned.
+[transcript_watch]
+enabled = true
+
+[stdio_capture]
+enabled = true
+# Longest captured fragment stored on one event, in bytes, after redaction.
+# Anything longer is truncated and the event says so.
+max_event_bytes = 4096
+# Score captured output with the checks layer. Needs [checks] enabled to do
+# anything; with it off, capture is recorded and not scored.
+score = true
+
+# ── Scanner model layer ──────────────────────────────────────────────────────
+# Optional model layer over the pattern-based skill scanner.
+#
+# WHY. Our patterns are open source, so an attacker can read the rules and
+# phrase an injection to avoid them — a regex is a specification for evading
+# it. A model generalises to phrasings nobody enumerated. This closes an
+# EVASION gap.
+#
+# WHAT IT DOES NOT DO. It cannot quieten a noisy scan. It is monotonic: it may
+# raise a finding's severity or add one the patterns missed, and it can never
+# clear, downgrade or suppress a pattern finding.
+#
+# PRIVACY — READ THIS. This sends file CONTENT to a third party, which is a
+# bigger disclosure than [checks] makes. Its own switch, deliberately: you can
+# have model-scored tool calls without shipping your skill files off the box.
+# When enabled, for each instruction-bearing file only — SKILL.md bodies, rules
+# files, MCP configs, prompt templates, hook scripts — the file's content is
+# passed through the [webhooks.redaction] redactor, truncated to
+# max_bytes_per_file, and sent to base_url. Changelogs, READMEs, licences,
+# lock files and tests are never sent.
+#
+# Patterns always run first and always run offline. If this layer cannot run —
+# no key, no network, an error, or the call cap — the scan still completes on
+# patterns alone and says so in its output.
+[scanner.jev]
+enabled = false
+api_key_file = "/etc/ringzero/typesafe.key"
+model        = "jev-latest"
+base_url     = "https://api.typesafe.ai"
+timeout_ms   = 4000
+# Cap on model calls per scan. Reaching it is reported, never silent.
+max_calls_per_scan = 40
+# Bytes of file content sent per file, after redaction. Counted in bytes, and
+# content past this point is NOT sent — an instruction planted at the end of a
+# very long file is not seen by this layer, though the patterns still read the
+# whole file.
+#
+# 8 KiB is a cost and disclosure choice, not a hard limit of the service: a
+# four-file batch at 16 KiB each was accepted and fully answered, and billed
+# about 14,900 input tokens for that single call. A scan may make up to
+# max_calls_per_scan of these, so the per-file size is the knob that decides
+# what a scan costs and how much leaves the machine.
+max_bytes_per_file = 8192

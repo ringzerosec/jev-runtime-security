@@ -1,0 +1,31 @@
+#!/bin/bash
+# Pre-remove: stop services and detach eBPF programs
+set -e
+
+# Stop the daemon (it owns the eBPF programs)
+systemctl stop ringzero-daemon 2>/dev/null || true
+systemctl disable ringzero-daemon 2>/dev/null || true
+
+# Detach any lingering eBPF programs (cgroup programs persist beyond process exit)
+if command -v bpftool &>/dev/null; then
+  # Detach LSM programs
+  for id in $(bpftool prog list 2>/dev/null | grep -E 'ringzero_' | awk '{print $1}' | tr -d ':'); do
+    bpftool prog detach id "$id" type lsm 2>/dev/null || true
+  done
+  # Detach cgroup programs (these survive process exit)
+  for cgroup_path in /sys/fs/cgroup /sys/fs/cgroup/unified; do
+    if [ -d "$cgroup_path" ]; then
+      bpftool cgroup detach "$cgroup_path" connect4 2>/dev/null || true
+      bpftool cgroup detach "$cgroup_path" connect6 2>/dev/null || true
+      bpftool cgroup detach "$cgroup_path" sock_ops 2>/dev/null || true
+    fi
+  done
+fi
+
+# Remove pinned BPF objects
+rm -rf /sys/fs/bpf/ringzero 2>/dev/null || true
+
+# Note: GRUB 'lsm=...bpf' is intentionally NOT removed.
+# The BPF LSM is harmless without the daemon — removing it could break
+# other BPF-based tools. Users can remove it manually if desired:
+#   sudo sed -i 's/,bpf//' /etc/default/grub && sudo update-grub
