@@ -495,6 +495,17 @@ static __always_inline int is_ai_agent(const char *comm) {
     if (comm[0] == 'c' && comm[1] == 'o' && comm[2] == 'd' && comm[3] == 'e' && comm[4] == 'x')
         return 1;
 
+    // "ChatGPT" — OpenAI ChatGPT/Codex desktop app (Electron). Every process it
+    // spawns (main, zygote, renderer, gpu, network/storage utility) shares the
+    // comm "ChatGPT", so this one prefix covers the whole app. comm is compared
+    // case-sensitively, so match the app's real casing, plus the lowercase form.
+    if (comm[0] == 'C' && comm[1] == 'h' && comm[2] == 'a' && comm[3] == 't' &&
+        comm[4] == 'G' && comm[5] == 'P' && comm[6] == 'T')
+        return 1;
+    if (comm[0] == 'c' && comm[1] == 'h' && comm[2] == 'a' && comm[3] == 't' &&
+        comm[4] == 'g' && comm[5] == 'p' && comm[6] == 't')
+        return 1;
+
     // "devin"
     if (comm[0] == 'd' && comm[1] == 'e' && comm[2] == 'v' && comm[3] == 'i' && comm[4] == 'n')
         return 1;
