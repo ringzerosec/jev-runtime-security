@@ -723,16 +723,30 @@ static __always_inline int is_monitored_current(const char *comm) {
 // Is this dentry inside a blocked directory?
 //
 // FAILS CLOSED ON TRUNCATION, and that is the point. The walk is bounded at
-// MAX_DIR_WALK because the verifier needs a fixed bound, and it used to simply
-// fall out of the loop and report "not blocked". A file thirteen directories
-// under a blocked root was therefore not blocked — the depth of a path decided
-// whether policy applied to it, which is not a property anyone would choose.
+// MAX_DIR_WALK is a fixed bound the verifier needs. The walk climbs the parent
+// chain looking for a blocked directory; it stops cleanly when it reaches the
+// filesystem root (d_parent == self).
 //
-// Running out of levels means we could not PROVE the file is outside a blocked
-// directory. That is a denial, not a pass.
+// THE TRUNCATION DECISION, and why it is fail-open. An earlier version set this
+// to 12 and DENIED when the walk ran out of levels, on the theory that a file
+// we could not prove was outside a blocked directory should be refused. That
+// was wrong in practice: it means the DEPTH of a path decides whether an agent
+// may read it. node_modules trees routinely sit deeper than a dozen
+// directories, so with any directory rule active, every agent doing ordinary
+// Node work was refused its own dependencies. It broke a real editor's agent
+// setup on the first try — the file was thirteen directories down and had
+// nothing to do with any rule.
+//
+// So: walk deep enough that every realistic path reaches the root and is judged
+// correctly, and on the rare genuine truncation, ALLOW rather than deny. A file
+// actually inside a blocked directory within MAX_DIR_WALK levels is still
+// caught; the residual gap is a protected file sitting more than MAX_DIR_WALK
+// directories below a blocked root, which is documented in SECURITY.md and is
+// far narrower than refusing every deep file. Blocking by depth is not a
+// property anyone would choose either.
 //
 // Returns 1 to block, 0 to allow.
-#define MAX_DIR_WALK 12
+#define MAX_DIR_WALK 32
 static __always_inline int dentry_under_blocked_dir(struct dentry *dentry) {
     struct ino_key bdir_probe = {};
     if (!bpf_map_lookup_elem(&blocked_dir_inodes, &bdir_probe))
@@ -756,8 +770,9 @@ static __always_inline int dentry_under_blocked_dir(struct dentry *dentry) {
         }
         walk = wp;
     }
-    // Ran out of levels with more path above us. Unproven, so denied.
-    return 1;
+    // Genuine truncation: more path above us than MAX_DIR_WALK levels. Allow,
+    // rather than refuse every deep file. See the header comment.
+    return 0;
 }
 
 // Check if a dentry is protected — either its basename is in blocked_files,
@@ -1098,7 +1113,7 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
             int in_allowed = 0;
             struct dentry *walk = BPF_CORE_READ(dentry, d_parent);
             #pragma unroll
-            for (int i = 0; i < 12; i++) {
+            for (int i = 0; i < MAX_DIR_WALK; i++) {
                 if (!walk) break;
                 struct dentry *wp = BPF_CORE_READ(walk, d_parent);
                 if (wp == walk) break; // reached root

@@ -75,10 +75,16 @@ hook only fires on an open:
 accepting entries at 10000. Insert failures are counted and surfaced, but a
 machine past that point stops taking new taint.
 
-**Directory blocks are bounded at 12 levels.** This one now fails CLOSED: a path
-deeper than the walk can prove is treated as blocked rather than allowed. Before
-that it failed open, and a file thirteen directories under a blocked root was
-not blocked.
+**Directory blocks resolve a file's parents up to 32 levels.** The walk climbs
+until it reaches the filesystem root, which every realistic path does well
+within the bound, and decides there. Only a genuinely pathological path deeper
+than 32 directories truncates, and there the walk fails OPEN: a protected file
+sitting more than 32 directories below a blocked root would not be caught by the
+directory rule. This is deliberate. An earlier version failed closed at 12
+levels, which meant the depth of a path decided whether policy applied to it and
+refused agents their own `node_modules`; blocking every deep file to close a
+gap this narrow is the wrong trade. A file directly named by a `blocked_files`
+or inode rule is caught regardless of depth.
 
 **Enforcement posture is recorded, not enforced.** `rz enforcement
 set-default/set-category` writes a posture that nothing in the event pipeline
