@@ -1,0 +1,254 @@
+; ─────────────────────────────────────────────────────────────────────────────
+;  Ring Zero — provenance graph schema (CozoDB / Datalog)
+;
+;  Design principle: the graph is a STATE ESTIMATOR, not an event log.
+;  We store the model of system behaviour, not the firehose of events that
+;  produced it. Time-travel (CozoDB @ Validity) lets us reconstruct any
+;  past behavioural state on demand.
+;
+;  Retention policy — three tiers, applied by `analyzer/retention.rs`:
+;
+;    HOT  (raw events, sensitive-path touches, decisions, threats, anomalies)
+;         24-72 hours, configurable per endpoint
+;    WARM (behavioural state: nodes + edges with counters, audit chain)
+;         30-90 days, default 30
+;    COLD (compressed monthly snapshots of behavioural baselines)
+;         1+ year, zstd-compressed off-graph
+;
+;  Hot-tier raw events are pruned aggressively; warm-tier state accumulates
+;  but is bounded by entity count (not event count) so it grows slowly.
+;
+;  See `analyzer/aggregator.rs` for the runtime decision: which incoming
+;  SecurityEvent becomes a counter increment vs. a stored event_raw row.
+; ─────────────────────────────────────────────────────────────────────────────
+
+
+; ── 1. Entity nodes ──────────────────────────────────────────────────────────
+;
+; One row per UNIQUE entity. Mutated by counter increments, not by appending
+; rows. CozoDB's Validity column lets us time-travel: ask `@ 'TIMESTAMP'` to
+; see the entity's state at any past moment.
+
+:create file_node {
+    path:            String       =>
+    first_seen:      Validity,
+    last_seen:       Validity,
+    ; sensitivity tier — set by aggregator.rs::classify_sensitivity at first
+    ; sight. Drives whether subsequent events get stored raw (hot tier) or
+    ; aggregated. 0=benign, 1=config, 2=credential-adjacent, 3=secret.
+    sensitivity:     Int,
+    open_count:      Int,
+    write_count:     Int,
+    last_blocked_at: Validity?,
+}
+
+:create process_node {
+    exe_path:        String,
+    comm:            String        =>
+    first_seen:      Validity,
+    last_seen:       Validity,
+    is_ai_agent:     Bool,
+    agent_type:      String?,      ; 'claude' | 'gemini' | ... when known
+    spawn_count:     Int,
+    ; rolling SHA-256 of the binary's last seen content; surfaces binary
+    ; tampering between runs of the "same" executable.
+    last_binary_sha: String?,
+}
+
+:create network_node {
+    host:            String,       ; FQDN or IP literal
+    port:            Int           =>
+    first_seen:      Validity,
+    last_seen:       Validity,
+    is_whitelisted:  Bool,
+    connect_count:   Int,
+    bytes_out:       Int,
+    bytes_in:        Int,
+}
+
+:create user_node {
+    uid:             Int           =>
+    username:        String,
+    first_seen:      Validity,
+    last_seen:       Validity,
+    is_operator:     Bool,         ; set by RZ_OPERATOR_UID at daemon start
+}
+
+:create session_node {
+    id:              String        =>      ; the auto-sanitised auto-{}-{} ID
+    started_at:      Validity,
+    ended_at:        Validity?,
+    agent_type:      String,
+    root_pid:        Int,
+    event_count:     Int,
+    blocked_count:   Int,
+    threat_count:    Int,
+    state:           String,       ; 'Active' | 'Terminated' | 'Approved' | ...
+}
+
+
+; ── 2. Behavioural edges (counter-updated, never duplicated) ─────────────────
+;
+; One row per UNIQUE relationship. The aggregator increments counts; it never
+; appends a new row for a repeated interaction. This is where the storage
+; collapse happens: 1000 reads of ~/.zshrc by `claude` is ONE `touched` row.
+
+:create touched {
+    process_exe:     String,
+    file_path:       String        =>
+    first_seen:      Validity,
+    last_seen:       Validity,
+    open_count:      Int,
+    write_count:     Int,
+    blocked_count:   Int,
+    ; computed by analyzer/baseline.rs — Z-score of this access pattern vs
+    ; the per-user / per-process baseline. > THRESHOLD ⇒ promote the raw
+    ; event into `event_raw` and emit an anomaly.
+    anomaly_score:   Float,
+}
+
+:create connected {
+    process_exe:     String,
+    host:            String,
+    port:            Int           =>
+    first_seen:      Validity,
+    last_seen:       Validity,
+    connect_count:   Int,
+    bytes_out:       Int,
+    bytes_in:        Int,
+    blocked_count:   Int,
+    anomaly_score:   Float,
+}
+
+:create spawned {
+    parent_exe:      String,
+    child_exe:       String        =>
+    first_seen:      Validity,
+    last_seen:       Validity,
+    count:           Int,
+}
+
+:create session_includes {
+    session_id:      String,
+    process_exe:     String        =>
+    first_seen:      Validity,
+    last_seen:       Validity,
+    event_count:     Int,
+}
+
+
+; ── 3. Raw events — stored ONLY when interesting ─────────────────────────────
+;
+; Promotion rules (see aggregator.rs::should_store_raw):
+;   • file open whose target is `sensitivity >= 2` (credential-adjacent)
+;   • any blocked decision
+;   • any first-time-seen (process, file) or (process, host) pair
+;   • any anomaly_score >= 3.0 (3 std-dev from baseline)
+;   • any Threat event from the SLM / injection scanner / supply-chain scanner
+;   • any cross-session lateral movement event
+;
+; Everything else updates a counter on the appropriate edge and is otherwise
+; discarded. Hot-tier retention is 72 hours by default; rows tagged
+; `permanent = true` (decisions, threats) survive into the warm tier.
+
+:create event_raw {
+    id:                  String     =>
+    kind:                String,    ; 'FileOpen' | 'NetworkConnect' | 'ProcessExec' | 'Threat' | ...
+    session_id:          String?,
+    process_exe:         String,
+    process_comm:        String,
+    pid:                 Int,
+    uid:                 Int,
+    target:              String,
+    blocked:             Bool,
+    reason:              String?,
+    ; if this event triggered a stored Decision, link to it
+    decision_id:         String?,
+    ; "permanent" rows are exempt from the 72-hour hot-tier prune
+    permanent:           Bool,
+    at:                  Validity,
+}
+
+:create decision {
+    id:                   String    =>
+    session_id:           String,
+    triggering_event_id:  String,
+    rule_id:              String,
+    verdict:              String,   ; 'allow' | 'block' | 'warn'
+    rationale:            Json,
+    ; the moment in time the rule fired — used to time-travel the graph
+    ; back to exactly the state the daemon saw when it decided.
+    graph_snapshot_at:    Validity,
+    decided_at:           Validity,
+}
+
+:create threat {
+    id:               String        =>
+    kind:             String,       ; 'injection_detected' | 'cross_session_chain' | 'supply_chain_risk' | ...
+    severity:         String,       ; 'critical' | 'high' | 'medium' | 'low'
+    matched_events:   [String],     ; event_raw ids that contributed
+    matched_nodes:    [String],     ; node ids that contributed
+    matched_pattern:  String?,      ; graph_correlation rule id, if any
+    confidence:       Float,
+    description:      String,
+    at:               Validity,
+}
+
+
+; ── 4. Indexes for the queries we actually run ───────────────────────────────
+;
+; CozoDB infers single-column indexes from the schema. We declare composite
+; indexes only where query patterns demand them — over-indexing inflates
+; storage and slows writes.
+
+::index touched_by_anomaly { touched (anomaly_score) }
+::index connected_by_anomaly { connected (anomaly_score) }
+::index event_raw_by_session { event_raw (session_id, at) }
+::index event_raw_by_target  { event_raw (target, at) }
+::index decision_by_session  { decision (session_id, decided_at) }
+::index threat_by_severity   { threat (severity, at) }
+
+
+; ── 5. Built-in queries (documented, not executed at create time) ────────────
+;
+; These are the canonical query patterns. Customer-written rules use the
+; same vocabulary. Each query is a paragraph of documentation; the actual
+; Rust code in `analyzer/graph_persistence/query.rs` exposes typed wrappers.
+;
+; Q1. "Has this (process, file) pair been seen before?"
+;        ?[c] := *touched{process_exe: $exe, file_path: $path, open_count: c}
+;        first-time-seen logic = the row doesn't exist OR open_count == 0
+;
+; Q2. "What did the graph look like at time T, for this session?"
+;        ?[node, attrs] :=
+;            *session_includes{session_id: $sid, process_exe: e @ $t},
+;            *process_node{exe_path: e, ...attrs @ $t}
+;
+; Q3. "Reproduce the decision context for decision D"
+;        ?[event, snapshot_state] :=
+;            *decision{id: $d, triggering_event_id: e, graph_snapshot_at: t},
+;            *event_raw{id: e, ...event},
+;            *touched{process_exe: ..., ...snapshot_state @ t}
+;
+; Q4. "Counterfactual: if rule R had been in place since time T0, how many
+;      additional events would it have blocked?"
+;        Replay event_raw rows with at >= $t0 through rule R using the
+;        graph state at each event's `at` timestamp. Pure read query, no
+;        writes — safe to run interactively.
+;
+; Q5. "Cross-session correlation — did agents A and B touch the same file
+;      within 5 minutes of each other?"
+;        ?[file, session_a, session_b, gap] :=
+;            *event_raw{kind: 'FileOpen', session_id: session_a, target: file, at: t1},
+;            *event_raw{kind: 'FileOpen', session_id: session_b, target: file, at: t2},
+;            session_a != session_b,
+;            gap = abs(t2 - t1),
+;            gap < 300_000_000_000   ; 5 minutes in nanoseconds
+;
+; Q6. "Hottest files by anomaly score in last 24h"
+;        ?[file, score, process] :=
+;            *touched{file_path: file, process_exe: process, anomaly_score: score,
+;                     last_seen: t},
+;            t > now() - 86400_000_000_000,
+;            score > 2.0
+;        :order -score :limit 50

@@ -1,0 +1,56 @@
+#!/bin/bash
+# Pre-remove: stop services and detach eBPF programs
+set -e
+
+# Stop the daemon (it owns the eBPF programs)
+systemctl stop ringzero-daemon 2>/dev/null || true
+systemctl disable ringzero-daemon 2>/dev/null || true
+
+# Detach any lingering eBPF programs. Keep in step with uninstall.sh.
+rz_detach_ebpf() {
+  # Programs are named ringzero_* (the kernel truncates to 15 chars).
+  local ids
+  ids=$(bpftool prog list 2>/dev/null | awk '/ name ringzero_/ {sub(":", "", $1); print $1}' || true)
+  [ -z "$ids" ] && return 0
+  # bpf_link attachments: every LSM hook, and cgroup hooks on kernels >= 5.7.
+  # "ID: TYPE  prog PROG_ID ..." -> "LINK_ID PROG_ID"
+  bpftool link list 2>/dev/null \
+    | awk '/^[0-9]+:/ {for (i = 2; i < NF; i++) if ($i == "prog") {sub(":", "", $1); print $1, $(i + 1)}}' \
+    | while read -r link_id prog; do
+        for id in $ids; do
+          if [ "$prog" = "$id" ]; then bpftool link detach id "$link_id" 2>/dev/null || true; fi
+        done
+      done || true
+  # Legacy cgroup attachments (pre-5.7 fallback) are not links and survive
+  # process exit. "ID  ATTACH_TYPE  [FLAGS]  NAME" -> detach by type and id.
+  for cg in /sys/fs/cgroup /sys/fs/cgroup/unified; do
+    [ -d "$cg" ] || continue
+    bpftool cgroup show "$cg" 2>/dev/null \
+      | awk '$1 ~ /^[0-9]+$/ && $NF ~ /^ringzero_/ {print $1, $2}' \
+      | while read -r id type; do
+          bpftool cgroup detach "$cg" "$type" id "$id" 2>/dev/null || true
+        done || true
+  done
+}
+
+rz_ebpf_remaining() {
+  bpftool prog list 2>/dev/null | grep -c ' name ringzero_' || true
+}
+
+if command -v bpftool &>/dev/null; then
+  rz_detach_ebpf
+  left=$(rz_ebpf_remaining)
+  if [ "$left" -ne 0 ]; then
+    echo "ringzero: $left eBPF program(s) still loaded after detach; reboot to clear them." >&2
+  fi
+else
+  echo "ringzero: bpftool not found, could not detach eBPF programs; reboot to clear them." >&2
+fi
+
+# Remove pinned BPF objects
+rm -rf /sys/fs/bpf/ringzero 2>/dev/null || true
+
+# Note: GRUB 'lsm=...bpf' is intentionally NOT removed.
+# The BPF LSM is harmless without the daemon — removing it could break
+# other BPF-based tools. Users can remove it manually if desired:
+#   sudo sed -i 's/,bpf//' /etc/default/grub && sudo update-grub

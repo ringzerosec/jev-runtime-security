@@ -1,0 +1,19 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+set -e
+
+case "$1" in
+  remove|upgrade|deconfigure)
+    # The launcher and the icons are package-owned files now, so dpkg removes
+    # them itself. This script used to delete them by hand, which meant an
+    # upgrade that stopped before configure — a wedged conffile prompt is
+    # enough — left the machine with no launcher entry and no icon at all.
+    # Only the legacy names, which no package owns, are cleaned up here.
+    rm -f /usr/share/applications/ringzero-security.desktop
+    rm -f /usr/share/icons/hicolor/128x128/apps/ringzero-security.png
+    gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
+    update-desktop-database /usr/share/applications 2>/dev/null || true
+    ;;
+esac
+
+exit 0

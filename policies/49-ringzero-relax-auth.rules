@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// OPTIONAL. Not installed by the package, and not needed for normal use.
+//
+// Ring Zero ships its polkit action as `auth_admin`, so every privileged change
+// made from the desktop app asks for an administrator password. That is
+// deliberate: `auth_admin_keep` remembers an answer for a few minutes, and that
+// window is exactly when an AI agent is running alongside you and could ride an
+// authentication a human gave for something else.
+//
+// If that is too much friction for your machines, this is the supported way to
+// relax it. Editing the installed action file at
+// /usr/share/polkit-1/actions/com.ringzerosecurity.app.policy works until the
+// next upgrade overwrites it; a rules file here does not.
+//
+//   sudo install -m 0644 policies/49-ringzero-relax-auth.rules \
+//       /etc/polkit-1/rules.d/49-ringzero-relax-auth.rules
+//   sudo systemctl restart polkit
+//
+// Remove the file and restart polkit to go back to asking every time.
+
+polkit.addRule(function (action, subject) {
+    if (action.id !== "com.ringzerosecurity.app.run-rz") {
+        return;
+    }
+
+    // Remember an administrator's answer for the polkit default retention
+    // window (about five minutes) instead of asking for every change.
+    //
+    // Swap for polkit.Result.AUTH_ADMIN to go back to asking every time, or
+    // read on before considering polkit.Result.YES.
+    return polkit.Result.AUTH_ADMIN_KEEP;
+
+    // DO NOT return polkit.Result.YES here. That would let anything running as
+    // a local user — including an agent — change kernel enforcement with no
+    // authentication at all, which removes the property this product exists to
+    // provide. If you want that, you do not need the app: give the operator the
+    // full-scope token instead and accept what it means.
+});

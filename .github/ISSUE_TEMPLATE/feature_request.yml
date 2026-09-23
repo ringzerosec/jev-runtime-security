@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Feature request
+description: Suggest a capability or a change in behaviour
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that the current behaviour makes hard?
+    validations: { required: true }
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+  - type: markdown
+    attributes:
+      value: |
+        Kernel-side changes under `drivers/linux/ebpf/` are accepted as issues and
+        suggestions rather than pull requests for now. See [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md).

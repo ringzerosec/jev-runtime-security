@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+[Desktop Entry]
+Name=Ring Zero Security
+Comment=Watch agent sessions, events and threats, and change enforcement with an admin authentication
+Exec=/usr/bin/ringzero-app
+Icon=ringzero-app
+Terminal=false
+Type=Application
+Categories=System;Security;Monitor;
+StartupNotify=true
+StartupWMClass=ringzero-app
+Keywords=security;ai;agent;ebpf;monitor;

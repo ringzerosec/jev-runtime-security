@@ -1,0 +1,3 @@
+#!/bin/bash
+# Pre-install: nothing needed — daemon runs as root for eBPF
+set -e

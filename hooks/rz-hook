@@ -1,0 +1,76 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ring Zero Security — agent tool-call hook (PreToolUse).
+#
+# Two modes, decided by the daemon's [checks] blocking setting:
+#
+#   blocking = false (default)  Post the event and exit. Fire-and-forget, no
+#                               decision is read, zero added latency. This is
+#                               the historical behaviour.
+#   blocking = true             Wait for a decision and, on deny, emit the
+#                               harness's deny response so the tool call does
+#                               not run.
+#
+# The deny shape is Claude Code's documented PreToolUse contract:
+#
+#   {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+#                           "permissionDecision": "deny",
+#                           "permissionDecisionReason": "..."}}
+#
+# implemented against https://code.claude.com/docs/en/hooks (fetched
+# 2026-09-22). That page states Claude Code "reads the JSON decision, blocks
+# the tool call, and shows Claude the reason", so the reason names the rule that
+# fired — never the allow-list or the protected-path inventory.
+#
+# We print the JSON and exit 0: on exit 0 the JSON alone decides the outcome.
+# Exit 2 also blocks, but it blocks even when the JSON says allow, so exit 0 is
+# the safer contract for a hook that usually allows.
+#
+# IMPORTANT, AND NOT A DETAIL: this hook is app-level and bypassable. An agent
+# can write and compile its own binary and call open(2) directly, which is
+# exactly what examples/boundary-demo.sh demonstrates. The kernel is the only
+# boundary that holds. This hook is a convenience that stops well-behaved tool
+# calls early; it is not the enforcement point.
+#
+# Every non-deny outcome exits 0, including every failure of ours, so a daemon
+# problem can never break a developer's agent pipeline.
+
+INPUT=$(cat)
+[ -z "$INPUT" ] && exit 0
+
+API="${RZ_API:-http://127.0.0.1:7700}"
+
+TOKEN=""
+[ -f "$HOME/.config/ringzero/api-token" ] && TOKEN=$(cat "$HOME/.config/ringzero/api-token")
+[ -z "$TOKEN" ] && [ -f /var/lib/ringzero/api-token ] && TOKEN=$(cat /var/lib/ringzero/api-token 2>/dev/null)
+
+# --max-time is the hard bound: the agent is released even if the daemon hangs.
+# The daemon applies its own, smaller, [checks] timeout_ms to any scorer call,
+# so this is a backstop rather than the primary budget.
+MAXTIME="${RZ_HOOK_MAX_TIME:-5}"
+
+if [ -n "$TOKEN" ]; then
+  RESP=$(/usr/bin/curl -s --max-time "$MAXTIME" -X POST \
+    -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+    --data-raw "$INPUT" "$API/api/v1/hook-event" 2>/dev/null)
+else
+  RESP=$(/usr/bin/curl -s --max-time "$MAXTIME" -X POST \
+    -H "Content-Type: application/json" \
+    --data-raw "$INPUT" "$API/api/v1/hook-event" 2>/dev/null)
+fi
+
+# No answer, or an answer we cannot read: allow. A hook that fails closed on a
+# transport error would take a developer's agent down with the daemon, and the
+# kernel is still enforcing underneath regardless.
+case "$RESP" in
+  *'"decision":"deny"'*) ;;
+  *) exit 0 ;;
+esac
+
+# Pull the reason out without needing jq (it is not installed everywhere).
+REASON=$(printf '%s' "$RESP" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')
+[ -z "$REASON" ] && REASON="Ring Zero policy: this tool call is out of policy for this agent."
+
+printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$REASON"
+exit 0

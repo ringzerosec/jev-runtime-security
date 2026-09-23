@@ -1,0 +1,33 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+set -e
+
+GREEN="\033[32m"; RESET="\033[0m"
+info() { printf "${GREEN}[+]${RESET} %s\n" "$*"; }
+
+case "$1" in
+  configure)
+    # The launcher, the icons and the polkit action are REAL FILES in this
+    # package now, not something generated here. A package that is unpacked but
+    # not yet configured still has all three, which is what we want: a wedged
+    # conffile prompt used to leave a machine with no launcher and no icon.
+    #
+    # All this step does is refresh the caches that only a package manager can
+    # sensibly refresh.
+
+    # Earlier versions installed the icon under a second name. Remove it so a
+    # stale file cannot win a theme lookup after an upgrade.
+    rm -f /usr/share/icons/hicolor/128x128/apps/ringzero-security.png
+    rm -f /usr/share/applications/ringzero-security.desktop
+
+    if [ -d /usr/share/icons/hicolor ]; then
+      gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
+    fi
+    update-desktop-database /usr/share/applications 2>/dev/null || true
+
+    info "Desktop viewer installed. Launch it from your application menu."
+    info "Changing enforcement from the app asks for an administrator password."
+    ;;
+esac
+
+exit 0

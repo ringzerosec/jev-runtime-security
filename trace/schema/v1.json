@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ringzerosec/jev-runtime-security/trace/schema/v1.json",
+  "title": "Ring Zero trace record, version 1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_type",
+    "timestamp",
+    "agent"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "event_type": {
+      "type": "string"
+    },
+    "host": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "policy_version": {
+      "type": "integer"
+    },
+    "agent": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "join key across both layers"
+        },
+        "agent_type": {
+          "type": "string"
+        },
+        "process": {
+          "type": "string"
+        },
+        "parent_process": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "uid": {
+          "type": "integer"
+        }
+      }
+    },
+    "args": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "hook": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/checkResult"
+          }
+        }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "properties": {
+        "allowed": {
+          "type": "boolean",
+          "description": "false only where the kernel refused. exec and connect are recorded, not refused, in this release."
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "checkResult": {
+      "type": "object",
+      "required": [
+        "check",
+        "option",
+        "probability",
+        "provider"
+      ],
+      "properties": {
+        "check": {
+          "enum": [
+            "tool_call_argument_risk",
+            "sensitive_data_exposure"
+          ]
+        },
+        "option": {
+          "type": "string",
+          "description": "one of the fixed option set for that check"
+        },
+        "probability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "How strongly the evidence determined the option. Absent when the question type carries no separate confidence, as with a noul answer; absent is not the same as 0."
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "short, non-secret fragments; never the matched value"
+        },
+        "provider": {
+          "enum": [
+            "jev",
+            "deterministic"
+          ],
+          "description": "which scorer produced this result. 'deterministic' with provider_error set means the hosted provider was unavailable and the local scorer was used."
+        },
+        "provider_error": {
+          "type": "string",
+          "description": "present only when a configured provider could not be used; the result is the deterministic fallback."
+        }
+      }
+    }
+  }
+}

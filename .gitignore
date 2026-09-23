@@ -1,0 +1,37 @@
+# Rust
+target/
+
+# Node / frontend
+**/node_modules/
+app/ui/dist/
+*.tsbuildinfo
+
+# Tauri generated schemas
+app/src-tauri/gen/
+
+# eBPF build artifacts. vmlinux.h is generated from the running kernel's BTF
+# by `make -C GPL/bpf`, so it is machine-specific and never committed.
+GPL/bpf/build/
+GPL/bpf/vmlinux.h
+
+# Environment files — never commit, even with placeholders
+.env
+.env.*
+
+# Packages and keys
+*.deb
+*.pem
+*.key
+
+# Logs
+*.log
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Python (guardrails examples)
+.venv/
+**/__pycache__/
+*.pyc

@@ -1,0 +1,84 @@
+[Unit]
+Description=Ring Zero Security Daemon
+Documentation=https://github.com/ringzerosec/jev-runtime-security
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+# Note: eBPF object at /usr/lib/ringzero/ringzero.bpf.o is optional.
+# Daemon starts without it and logs a warning (kernel monitoring disabled).
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ringzero-daemon
+Restart=on-failure
+RestartSec=30
+RuntimeDirectory=ringzero
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+# Persistent data
+StateDirectory=ringzero
+StateDirectoryMode=0750
+LogsDirectory=ringzero
+LogsDirectoryMode=0750
+
+# Must run as root to attach eBPF LSM programs
+User=root
+
+# Delegate this service's cgroup-v2 subtree to the daemon so auto-containment can
+# create per-session cgroups inside it. Without this, systemd's `nsdelegate` mount
+# option forbids creating cgroups under /sys/fs/cgroup and containment is a silent
+# no-op (the daemon resolves its base from /proc/self/cgroup at startup).
+Delegate=yes
+
+# Capability set. Each cap is load-bearing:
+#   CAP_SYS_ADMIN       — REQUIRED: the SSL uprobes attach via perf_event_open
+#                         and read SSL_write/SSL_read plaintext buffers (arbitrary
+#                         process memory). Creating a uprobe perf event that can
+#                         extract memory needs CAP_SYS_ADMIN — CAP_PERFMON does
+#                         NOT cover it (verified live: dropping it →
+#                         `perf_event_open failed`, probes=0, SSL interception
+#                         dead). So CAP_SYS_ADMIN cannot be dropped while the
+#                         TLS-plaintext DLP capability exists. (The mitigation we
+#                         DO keep is NoNewPrivileges=true below.)
+#   CAP_BPF             — create maps / load BPF programs
+#   CAP_PERFMON         — BPF helpers + perf/ringbuf
+#   CAP_MAC_ADMIN       — attach BPF LSM programs (BPF_LSM_MAC)
+#   CAP_NET_ADMIN       — cgroup connect4/6 attach + nftables containment
+#   CAP_KILL            — terminate agent sessions via libc::kill
+#   CAP_DAC_READ_SEARCH — read+traverse every user's mode-750 home to scan agent
+#                         skill surfaces / credentials (read/traverse only, NOT
+#                         CAP_DAC_OVERRIDE), matching ProtectHome=read-only.
+#   CAP_SYS_PTRACE      — read /proc/<pid>/fd to answer "which local process is
+#                         making this API call". Reading another process's fd
+#                         links goes through ptrace_may_access(PTRACE_MODE_READ),
+#                         which a root process WITHOUT this capability fails:
+#                         verified on Ubuntu 24.04 by bisecting this very line.
+#                         Needed for the caller check in api/caller.rs, which
+#                         refuses a policy change whose caller is an AI agent
+#                         even when the bearer token is valid. No debugger is
+#                         attached and nothing is traced: this is a read of
+#                         /proc. It is a real widening of the daemon's
+#                         privilege, and it is small next to CAP_SYS_ADMIN,
+#                         which is already here and is close to full root.
+AmbientCapabilities=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON CAP_MAC_ADMIN CAP_NET_ADMIN CAP_KILL CAP_DAC_READ_SEARCH CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON CAP_MAC_ADMIN CAP_NET_ADMIN CAP_KILL CAP_DAC_READ_SEARCH CAP_SYS_PTRACE
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/var/run/ringzero /etc/ringzero /var/log/ringzero /var/lib/ringzero /usr/lib/ringzero
+PrivateTmp=true
+# Forbid privilege gain via setuid/setcap on anything the daemon execs
+# (nft/ip/etc. inherit only the ambient caps above — nothing more).
+NoNewPrivileges=true
+# read-only, NOT yes: the daemon is a security scanner — it must READ user home
+# dirs to inventory agent skill surfaces (rz scan skills), credentials (NHI), and
+# to watch ~/.claude etc. `ProtectHome=yes` hides /home entirely (mode d---------)
+# and silently blinds all of that. read-only keeps homes immutable to the daemon.
+ProtectHome=read-only
+MemoryDenyWriteExecute=no
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

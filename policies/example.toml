@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example Ring Zero policy.
+#
+# Protected objects are refused in the kernel for an agent's whole process
+# tree, matched by basename and by (device, inode) — so a rename, a hardlink
+# or a symlink lands on the same decision.
+#
+# Exec and network rules in this file are RECORDED, not refused. See
+# GPL/README.md for the exact scope.
+
+[daemon]
+# observe: record everything, refuse nothing. Start here.
+# enforce: refuse protected-file operations.
+mode = "observe"
+
+# Files the agent may not open, create, delete or rename.
+[[file_access.rules]]
+pattern     = "/home/dev/.aws/credentials"
+action      = "block"
+description = "cloud credentials"
+
+[[file_access.rules]]
+pattern     = "id_rsa"
+action      = "block"
+description = "ssh private key, by basename so copies are covered"
+
+[[file_access.rules]]
+pattern     = "/etc/ld.so.preload"
+action      = "block"
+description = "loader preload — a persistence path"
+
+# The service, its config and its policy store are protected objects too. This
+# is what stops an agent editing the config or killing the daemon: those become
+# ordinary denied operations on an object, not commands we try to blocklist.
+[[file_access.rules]]
+pattern     = "/etc/ringzero/daemon.toml"
+action      = "block"
+description = "our own config"
+
+[[file_access.rules]]
+pattern     = "/usr/bin/ringzero-daemon"
+action      = "block"
+description = "our own binary"
+
+# Deterministic scorers. Off by default; they never allow or deny anything.
+[checks]
+enabled        = false
+workspace      = "/home/dev/project"
+approved_hosts = ["registry.npmjs.org", "pypi.org"]
