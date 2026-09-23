@@ -1242,6 +1242,10 @@ pub async fn start(
         ("ringzero_inode_create", "inode_create"),
         ("ringzero_inode_unlink", "inode_unlink"),
         ("ringzero_inode_rename", "inode_rename"),
+        // inode_link: refuse hardlinking a protected file out of a blocked
+        // directory. Without this, link(2) creates a second name for the same
+        // inode outside the rule's scope and the content leaks through it.
+        ("ringzero_inode_link", "inode_link"),
         ("ringzero_bprm_check", "bprm_check_security"),
         ("ringzero_socket_connect", "socket_connect"),
         ("ringzero_socket_sendmsg", "socket_sendmsg"),

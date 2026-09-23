@@ -1293,6 +1293,48 @@ int BPF_PROG(ringzero_inode_rename, struct inode *old_dir, struct dentry *old_de
     return 0;
 }
 
+// Hardlinking a protected file was a real bypass. A directory rule blocks by
+// path containment: a file is refused because it lives inside a blocked
+// directory. But link(2) does not open the file, so file_open never fired, and
+// a hardlink is a SECOND NAME for the same inode placed anywhere the agent
+// likes — outside the blocked directory. Reading that second name then walked
+// a parent chain that never touched the blocked directory, so nothing caught
+// it. mv and cp were refused because they open the source; ln was not.
+//
+// The fix is to refuse the link at creation: an agent may not create a new
+// name for a file that is currently protected. Checked on the SOURCE dentry,
+// the existing file being linked, with the same is_dentry_protected the other
+// mutation hooks use, so it covers blocked basenames, blocked inodes and files
+// inside a blocked directory alike.
+SEC("lsm/inode_link")
+int BPF_PROG(ringzero_inode_link, struct dentry *old_dentry, struct inode *dir,
+             struct dentry *new_dentry) {
+    struct config *cfg = get_config();
+    if (!cfg || !cfg->enabled || !cfg->enforce_blocks)
+        return 0;
+
+    char comm[MAX_COMM_LEN] = {};
+    bpf_get_current_comm(comm, sizeof(comm));
+    if (!is_monitored_current(comm))
+        return 0;
+
+    if (old_dentry && is_dentry_protected(old_dentry)) {
+        struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+        if (e) {
+            e->type = EVENT_FILE_CREATE; // a hardlink creates a new name
+            e->blocked = 1;
+            fill_process_info(e);
+            __builtin_memset(e->path, 0, MAX_PATH_LEN);
+            bpf_probe_read_kernel_str(e->path, MAX_PATH_LEN,
+                                       BPF_CORE_READ(old_dentry, d_name.name));
+            bpf_ringbuf_submit(e, 0);
+        }
+        return -EACCES;
+    }
+
+    return 0;
+}
+
 SEC("lsm/bprm_check_security")
 int BPF_PROG(ringzero_bprm_check, struct linux_binprm *bprm) {
     struct config *cfg = get_config();
