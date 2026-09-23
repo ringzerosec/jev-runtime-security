@@ -2400,6 +2400,10 @@ async fn async_main() -> Result<()> {
                     events: proxy_event_tx.clone(),
                     review: Some(review.clone()),
                     redact,
+                    // The operator's own protected paths, from the same rule
+                    // store the daemon pushes to the kernel. Re-resolved on a
+                    // slow cadence so a later `rz file-access add` is seen.
+                    protected: Arc::new(write_scan::load_protected_paths),
                 });
             }
             Err(e) => {

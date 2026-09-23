@@ -176,6 +176,286 @@ pub fn scan_agent_code(content: &str) -> Vec<CodeFinding> {
     out
 }
 
+// ── Intent against the OPERATOR'S OWN protected paths ───────────────────────
+//
+// The hardcoded lists above ask "does this code name a WELL-KNOWN secret". They
+// cannot answer the question the operator actually configured: "does this code
+// reach a path I MYSELF marked protected". A script that copies
+// `/home/u/projects/editor_probe.txt` out to `/tmp/leak.txt` names nothing on
+// any credential list, yet it walks straight into a directory the operator
+// blocked with `rz file-access add ~/projects/* block --dir`. That is the gap
+// these rules close, and they close it with the operator's own rule store —
+// the SAME list the daemon pushes to the kernel maps — not with a new guess.
+//
+// TWO SEVERITIES, and the necessary condition is the same for both.
+//   * Reference to a protected path, on its own            → High.
+//   * Reference to a protected path AND a data-movement     → Critical, and the
+//     shape (copy / rename / network send / base64 / …)       narrative is
+//                                                              "exfiltration".
+//
+// THE FALSE-POSITIVE FLOOR. A reference to a protected path is NECESSARY. A
+// script that copies a file the operator never protected produces nothing, and
+// ordinary I/O in a normal script produces nothing, because neither one names a
+// protected path. This is deliberate: the project has bled false positives
+// before, and the protected-path gate is what keeps a benign `shutil.copy` of a
+// build artifact silent while catching the copy of a blocked file.
+
+/// The rule store the daemon reads and pushes to the kernel. We read the SAME
+/// userspace file — never the BPF maps — so the scanner and the kernel agree on
+/// what "protected" means.
+pub const FILE_ACCESS_RULES_PATH: &str = "/etc/ringzero/file-access-rules.json";
+
+/// The operator's own protected paths, resolved from the file-access rule store.
+///
+/// This mirrors exactly what `ebpf_loader::load_file_access_rules` pushes to the
+/// kernel: every `block` rule contributes its basenames, a concrete absolute
+/// path contributes itself, and a `dir` rule contributes its directory. All of
+/// it is lowercased once here, because the scan compares against lowercased
+/// content.
+#[derive(Debug, Clone, Default)]
+pub struct ProtectedPaths {
+    /// Basenames the operator blocks (`blocked_files`), e.g. `id_rsa`.
+    pub basenames: Vec<String>,
+    /// Directories the operator blocks (`blocked_dir_inodes`), expanded, with no
+    /// trailing glob, e.g. `/home/u/projects`.
+    pub dirs: Vec<String>,
+    /// Concrete absolute file paths the operator blocks (`blocked_inodes`).
+    pub files: Vec<String>,
+}
+
+impl ProtectedPaths {
+    pub fn is_empty(&self) -> bool {
+        self.basenames.is_empty() && self.dirs.is_empty() && self.files.is_empty()
+    }
+}
+
+/// Resolve the operator's protected paths from the default rule store.
+pub fn load_protected_paths() -> ProtectedPaths {
+    load_protected_paths_from(FILE_ACCESS_RULES_PATH)
+}
+
+/// Resolve from a named store, so the loader can be tested without touching
+/// `/etc`.
+fn load_protected_paths_from(path: &str) -> ProtectedPaths {
+    let data = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(_) => return ProtectedPaths::default(),
+    };
+    let rules: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+    protected_from_rules(&rules)
+}
+
+/// The pure core: rule JSON in, resolved protected paths out. Mirrors the three
+/// mechanisms in `ebpf_loader::load_file_access_rules` so the scanner protects
+/// exactly what the kernel does.
+fn protected_from_rules(rules: &[serde_json::Value]) -> ProtectedPaths {
+    let mut p = ProtectedPaths::default();
+    for rule in rules {
+        if rule["action"].as_str() != Some("block") {
+            continue;
+        }
+        let Some(pattern) = rule["pattern"].as_str() else {
+            continue;
+        };
+
+        // Basenames come from EVERY block rule, exactly as the loader's first
+        // pass does — a `dir` rule that also yields basenames keeps them.
+        for name in crate::api::routes::pattern_to_basenames(pattern) {
+            let name = name.to_lowercase();
+            if !name.is_empty() && !p.basenames.contains(&name) {
+                p.basenames.push(name);
+            }
+        }
+
+        // A concrete absolute path is pinned by inode; record the path itself.
+        let expanded = crate::policy::file_rule::expand_tilde(pattern.trim()).to_lowercase();
+        if expanded.starts_with('/')
+            && !expanded.contains(['*', '?', '['])
+            && !p.files.contains(&expanded)
+        {
+            p.files.push(expanded);
+        }
+
+        // A directory rule contributes its directory.
+        let mut legacy = false;
+        let kind = crate::policy::file_rule::infer_kind(
+            pattern,
+            rule["kind"].as_str(),
+            rule["description"].as_str(),
+            &mut legacy,
+        );
+        if kind == crate::policy::file_rule::Kind::Dir {
+            let dir = crate::policy::file_rule::dir_target(pattern).to_lowercase();
+            if !dir.is_empty() && dir != "/" && !p.dirs.contains(&dir) {
+                p.dirs.push(dir);
+            }
+        }
+    }
+    p
+}
+
+/// Shapes that move data: a copy, a rename, a network send, a base64 of bytes,
+/// or a read followed by a write elsewhere. Matched only once a protected path
+/// is already referenced, so the list can be generous without producing noise
+/// on its own. Every entry is a literal substring of lowercased code.
+const CODE_MOVEMENT: &[&str] = &[
+    // Python file moves.
+    "shutil.copy",
+    "shutil.move",
+    "copyfile",
+    "copytree",
+    "os.rename",
+    "os.replace",
+    "os.link",
+    "os.symlink",
+    // Network sends.
+    "requests.post",
+    "requests.put",
+    "requests.patch",
+    "urllib.request",
+    "urllib.urlopen",
+    "http.client",
+    "httpx.",
+    "aiohttp",
+    "socket.socket",
+    "smtplib",
+    "boto3",
+    "paramiko",
+    "ftplib",
+    "webhook",
+    // Encoding for exfil.
+    "base64",
+    "b64encode",
+    // Shell moves and sends.
+    "curl ",
+    "wget ",
+    "scp ",
+    "rsync ",
+    "tee ",
+    "nc ",
+    "cp ",
+    "mv ",
+    "/dev/tcp/",
+];
+
+/// True if `open(` is opened for writing/appending, which is a data-movement
+/// shape when the read side names a protected path.
+fn opens_for_write(hay: &str) -> bool {
+    if !hay.contains("open(") {
+        return false;
+    }
+    for m in [
+        ",\"w", ",'w", ", \"w", ", 'w", "mode=\"w", "mode='w", ",\"a", ",'a", ", \"a", ", 'a",
+        "mode=\"a", "mode='a",
+    ] {
+        if hay.contains(m) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if `hay` contains `needle` ending on a token boundary. Used so a
+/// protected `/home/u/projects` does not match `/home/u/projects_backup`, while
+/// still matching `/home/u/projects/editor_probe.txt`.
+fn contains_path_token(hay: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = hay.as_bytes();
+    let nlen = needle.len();
+    let mut start = 0;
+    while let Some(pos) = hay[start..].find(needle) {
+        let i = start + pos;
+        let after = i + nlen;
+        let after_ok = after >= bytes.len() || !is_name_byte(bytes[after]);
+        if after_ok {
+            return true;
+        }
+        start = i + 1;
+    }
+    false
+}
+
+/// A byte that can be part of a file-name token, for the boundary test above.
+fn is_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Which protected path this code reaches, if any. Directories and concrete
+/// paths match anywhere with an end boundary; a basename must appear as a path
+/// segment (preceded by `/`), which keeps a bare word like `credentials` from
+/// matching prose while still catching `~/.ssh/id_rsa`.
+fn references_protected(hay: &str, protected: &ProtectedPaths) -> Option<String> {
+    for d in &protected.dirs {
+        if contains_path_token(hay, d) {
+            return Some(d.clone());
+        }
+    }
+    for f in &protected.files {
+        if contains_path_token(hay, f) {
+            return Some(f.clone());
+        }
+    }
+    for b in &protected.basenames {
+        if contains_path_token(hay, &format!("/{b}")) {
+            return Some(b.clone());
+        }
+    }
+    None
+}
+
+/// Which movement shape this code shows, if any.
+fn movement_shape(hay: &str) -> Option<String> {
+    for m in CODE_MOVEMENT {
+        if hay.contains(m) {
+            return Some((*m).trim().to_string());
+        }
+    }
+    if opens_for_write(hay) {
+        return Some("open-for-write".to_string());
+    }
+    if hay.contains("read(") && hay.contains(".write(") {
+        return Some("read-then-write".to_string());
+    }
+    None
+}
+
+/// Score generated code against the operator's OWN protected paths.
+///
+/// Additive to `scan_agent_code`: this is deterministic, offline, substring
+/// only, and it can set the kernel enforce bit exactly like the hardcoded lists
+/// — a reference-plus-movement is a Critical pattern match, not a model guess.
+/// The `matched` literal names the protected path (operator config) and the
+/// movement token (our list); it never carries scanned file bytes.
+pub fn scan_protected_intent(content: &str, protected: &ProtectedPaths) -> Vec<CodeFinding> {
+    if protected.is_empty() {
+        return Vec::new();
+    }
+    let hay = content.to_lowercase();
+    // THE NECESSARY CONDITION. No protected path referenced, nothing to say —
+    // this is the false-positive floor, keeping a benign copy of an unprotected
+    // file silent.
+    let Some(proto) = references_protected(&hay, protected) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    match movement_shape(&hay) {
+        Some(mv) => out.push(CodeFinding {
+            rule_id: "WRITE-EXFIL-INTENT".to_string(),
+            severity: Severity::Critical,
+            matched: format!("exfiltration intent: protected {proto} + {mv}"),
+        }),
+        None => out.push(CodeFinding {
+            rule_id: "WRITE-PROTECTED-REF".to_string(),
+            severity: Severity::High,
+            matched: format!("protected path referenced: {proto}"),
+        }),
+    }
+    out
+}
+
 /// Turn findings into the two pieces of state the kernel holds.
 ///
 /// THE SAFETY ARGUMENT LIVES HERE, and it is a function so it can be tested
@@ -221,6 +501,11 @@ pub struct ScanContext {
     pub events: mpsc::Sender<SecurityEvent>,
     pub review: Option<Arc<crate::review::ReviewQueue>>,
     pub redact: Arc<dyn Fn(&mut serde_json::Value) + Send + Sync>,
+    /// Resolve the operator's protected paths — the same rule store the daemon
+    /// pushes to the kernel. A closure, not a snapshot, so a rule added with
+    /// `rz file-access add` after the scanner starts is picked up on the next
+    /// refresh rather than needing a restart.
+    pub protected: Arc<dyn Fn() -> ProtectedPaths + Send + Sync>,
 }
 
 /// Is this file worth reading at all?
@@ -492,6 +777,38 @@ impl RateLimit {
     }
 }
 
+/// The operator's protected paths, re-resolved from the rule store on a slow
+/// cadence. Re-reading a small JSON file per scanned file would be wasteful in
+/// a build; re-reading it never would miss a rule the operator just added. A
+/// few seconds is the right middle: new rules land quickly, and a burst of
+/// writes shares one read.
+struct ProtectedCache {
+    resolve: Arc<dyn Fn() -> ProtectedPaths + Send + Sync>,
+    paths: ProtectedPaths,
+    loaded_at: Instant,
+}
+
+impl ProtectedCache {
+    const TTL: Duration = Duration::from_secs(5);
+
+    fn new(resolve: Arc<dyn Fn() -> ProtectedPaths + Send + Sync>) -> Self {
+        let paths = resolve();
+        ProtectedCache {
+            resolve,
+            paths,
+            loaded_at: Instant::now(),
+        }
+    }
+
+    fn get(&mut self) -> ProtectedPaths {
+        if self.loaded_at.elapsed() >= Self::TTL {
+            self.paths = (self.resolve)();
+            self.loaded_at = Instant::now();
+        }
+        self.paths.clone()
+    }
+}
+
 /// Start the watcher. Returns immediately; the work happens on a task.
 pub fn spawn(ctx: ScanContext) {
     tokio::spawn(async move {
@@ -535,12 +852,14 @@ async fn run(ctx: ScanContext) -> anyhow::Result<()> {
 
     let mut cache = HashCache::new();
     let mut rate = RateLimit::new(ctx.cfg.max_scans_per_minute);
+    let mut protected = ProtectedCache::new(Arc::clone(&ctx.protected));
 
     loop {
         match watcher.read_events() {
             Ok(events) => {
                 for ev in events {
-                    handle(&ctx, &mut cache, &mut rate, ev).await;
+                    let now_protected = protected.get();
+                    handle(&ctx, &mut cache, &mut rate, &now_protected, ev).await;
                 }
             }
             Err(e) => {
@@ -558,6 +877,7 @@ async fn handle(
     ctx: &ScanContext,
     cache: &mut HashCache,
     rate: &mut RateLimit,
+    protected: &ProtectedPaths,
     ev: fanotify::CloseWrite,
 ) {
     // 1. WHO WROTE IT. Everything else is gated on this, before any content is
@@ -637,9 +957,15 @@ async fn handle(
     } else {
         Vec::new()
     };
-    // The instruction-file patterns above say nothing about code. These do.
+    // The instruction-file patterns above say nothing about code. These do:
+    // the hardcoded well-known-secret lists, AND the operator's OWN protected
+    // paths — a copy of a file under a blocked directory is exfiltration intent
+    // even when the path is on no credential list. Both are deterministic and
+    // both may reach the kernel enforce bit.
     let code_findings = if is_text {
-        scan_agent_code(&content)
+        let mut v = scan_agent_code(&content);
+        v.extend(scan_protected_intent(&content, protected));
+        v
     } else {
         Vec::new()
     };
@@ -990,6 +1316,198 @@ mod tests {
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].matched, ".ssh/id_rsa");
         assert!(!f[0].matched.contains("hunter2"));
+    }
+
+    // ── Intent against the operator's OWN protected paths ───────────────────
+
+    /// A protected directory rule, resolved the way the daemon resolves it.
+    fn protected_dir(dir: &str) -> ProtectedPaths {
+        ProtectedPaths {
+            dirs: vec![dir.to_lowercase()],
+            ..Default::default()
+        }
+    }
+
+    /// The reported bug, as a test. An agent copied a file out of a directory
+    /// the operator blocked, the path was on no credential list, and nothing
+    /// fired. It must fire now, at Critical, and say exfiltration.
+    #[test]
+    fn a_copy_out_of_a_protected_directory_is_critical_exfil_intent() {
+        let protected = protected_dir("/home/vboxuser/projects");
+        let src = r#"
+            import shutil
+            shutil.copyfile("/home/vboxuser/projects/editor_probe.txt", "/tmp/leak.txt")
+        "#;
+        let f = scan_protected_intent(src, &protected);
+        assert_eq!(f.len(), 1, "one finding for the copy of a protected file");
+        assert_eq!(f[0].severity, Severity::Critical);
+        assert_eq!(f[0].rule_id, "WRITE-EXFIL-INTENT");
+        assert!(
+            f[0].matched.contains("exfiltration"),
+            "the narrative must name exfiltration intent, got {:?}",
+            f[0].matched
+        );
+    }
+
+    /// A bash copy of a protected file is the same intent by another tool.
+    #[test]
+    fn a_shell_copy_out_of_a_protected_directory_is_critical() {
+        let protected = protected_dir("/home/vboxuser/projects");
+        let src = "#!/bin/bash\ncp /home/vboxuser/projects/editor_probe.txt /tmp/leak.txt\n";
+        let f = scan_protected_intent(src, &protected);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Critical);
+    }
+
+    /// Referencing a protected path WITHOUT moving anything is High, not
+    /// Critical: worth a human, not yet exfiltration.
+    #[test]
+    fn a_reference_to_a_protected_path_without_movement_is_high() {
+        let protected = protected_dir("/home/vboxuser/projects");
+        // Reads and prints; no copy, no send, no write elsewhere.
+        let src = r#"
+            with __import__("io").open("/home/vboxuser/projects/notes.txt") as fh:
+                print(len(fh.readlines()))
+        "#;
+        let f = scan_protected_intent(src, &protected);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::High);
+        assert_eq!(f[0].rule_id, "WRITE-PROTECTED-REF");
+    }
+
+    /// THE FALSE-POSITIVE FLOOR. A copy of a file the operator never protected
+    /// must be silent, even though it is exactly the same movement shape.
+    #[test]
+    fn a_benign_copy_of_a_non_protected_file_is_silent() {
+        let protected = protected_dir("/home/vboxuser/projects");
+        for src in [
+            "import shutil\nshutil.copyfile(\"/tmp/a.txt\", \"/tmp/b.txt\")\n",
+            "#!/bin/bash\ncp /var/log/app.log /tmp/app.log\n",
+            "import shutil\nshutil.move(\"build/out.o\", \"dist/out.o\")\n",
+        ] {
+            assert!(
+                scan_protected_intent(src, &protected).is_empty(),
+                "false positive on a non-protected copy: {src:?}"
+            );
+        }
+    }
+
+    /// Ordinary tool I/O near a protected directory's siblings must not be
+    /// swept up: `node_modules` and a generic `config` are not protected, and
+    /// the directory-prefix match must not spill across a name boundary.
+    #[test]
+    fn node_modules_and_config_writes_are_not_swept_up() {
+        let protected = protected_dir("/home/vboxuser/projects");
+        for src in [
+            "const fs=require('fs');fs.writeFileSync('node_modules/.cache/config.json','{}')",
+            "import shutil\nshutil.copyfile('config.yml', 'dist/config.yml')\n",
+            // The boundary trap: projects_backup is NOT under /projects.
+            "import shutil\nshutil.copyfile('/home/vboxuser/projects_backup/x', '/tmp/y')\n",
+        ] {
+            assert!(
+                scan_protected_intent(src, &protected).is_empty(),
+                "false positive sweeping in ordinary config/build I/O: {src:?}"
+            );
+        }
+    }
+
+    /// A protected basename matches only as a path segment, so `~/.ssh/id_rsa`
+    /// is caught while the bare word `credentials` in prose is not.
+    #[test]
+    fn a_protected_basename_matches_as_a_path_segment_only() {
+        let protected = ProtectedPaths {
+            basenames: vec!["id_rsa".to_string()],
+            ..Default::default()
+        };
+        let hit = "import shutil\nshutil.copyfile('/home/u/.ssh/id_rsa','/tmp/k')\n";
+        let f = scan_protected_intent(hit, &protected);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Critical);
+
+        // The word in prose, not as a path, is not a reference.
+        let miss = "# this script rotates the id_rsazzz style keys nightly\nprint('ok')\n";
+        assert!(scan_protected_intent(miss, &protected).is_empty());
+    }
+
+    /// With no protected paths configured, the intent scorer is inert — it can
+    /// never be the thing that introduces a false positive on a fresh install.
+    #[test]
+    fn no_protected_paths_means_no_intent_findings() {
+        let empty = ProtectedPaths::default();
+        let src = "import shutil\nshutil.copyfile('/home/u/projects/x','/tmp/y')\n";
+        assert!(scan_protected_intent(src, &empty).is_empty());
+    }
+
+    /// The resolver reads the SAME store the daemon pushes to the kernel, and
+    /// turns each mechanism into the right bucket: a `dir` rule into `dirs`, a
+    /// concrete path into `files`, an ssh rule into its basenames.
+    #[test]
+    fn protected_paths_resolve_from_the_rule_store_like_the_kernel() {
+        let rules = serde_json::json!([
+            {"id":"1","pattern":"~/projects/*","action":"block","source":"custom","kind":"dir"},
+            {"id":"2","pattern":"/etc/shadow","action":"block","source":"custom","kind":"file"},
+            {"id":"3","pattern":"~/.ssh/*","action":"block","source":"custom"},
+            {"id":"4","pattern":"/tmp/allowed/*","action":"allow","source":"custom","kind":"dir"},
+        ]);
+        let arr = rules.as_array().unwrap();
+        let p = protected_from_rules(arr);
+
+        assert!(
+            p.dirs.iter().any(|d| d.ends_with("/projects")),
+            "the dir rule must land in dirs, got {:?}",
+            p.dirs
+        );
+        assert!(
+            p.files.iter().any(|f| f == "/etc/shadow"),
+            "the concrete path must land in files, got {:?}",
+            p.files
+        );
+        assert!(
+            p.basenames.iter().any(|b| b == "id_rsa"),
+            "the ssh rule must contribute basenames, got {:?}",
+            p.basenames
+        );
+        // An allow rule protects nothing here — it scopes, it does not block.
+        assert!(
+            !p.dirs.iter().any(|d| d.contains("allowed")),
+            "an allow rule must not become a protected path"
+        );
+    }
+
+    /// A malformed or missing store yields nothing, never an error.
+    #[test]
+    fn a_missing_rule_store_yields_no_protected_paths() {
+        let p = load_protected_paths_from("/nonexistent/ringzero/rules.json");
+        assert!(p.is_empty());
+    }
+
+    /// THE MONOTONIC CONTRACT, restated for the new findings. An exfil-intent
+    /// finding is a DETERMINISTIC Critical, so it — like any pattern match —
+    /// reaches the enforce bit through `decide`. A model verdict of the same
+    /// severity still cannot. This proves the new rule feeds the pattern side
+    /// of `decide`, never the model side.
+    #[test]
+    fn exfil_intent_is_deterministic_and_the_model_path_is_still_inert() {
+        let protected = protected_dir("/home/vboxuser/projects");
+        let src = "import shutil\nshutil.copyfile('/home/vboxuser/projects/x','/tmp/y')\n";
+        let worst = scan_protected_intent(src, &protected)
+            .iter()
+            .map(|f| f.severity.clone())
+            .max_by_key(|s| s.weight());
+        assert_eq!(worst, Some(Severity::Critical));
+
+        // As a deterministic pattern, it CAN set the bit.
+        let (enforce, review, sev) = decide(worst.clone(), None, Severity::Critical);
+        assert!(enforce, "a deterministic Critical reaches the enforce bit");
+        assert!(review);
+        assert_eq!(sev, Severity::Critical);
+
+        // The SAME Critical arriving from the model side cannot, unchanged.
+        let (enforce_model, _, _) = decide(None, Some(Severity::Critical), Severity::Critical);
+        assert!(
+            !enforce_model,
+            "a model Critical must never reach the enforce bit"
+        );
     }
 
     // ── Scope ───────────────────────────────────────────────────────────────
