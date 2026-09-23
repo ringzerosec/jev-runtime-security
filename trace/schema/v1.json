@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ringzerosec/jev-agentic-security/trace/schema/v1.json",
+  "$id": "https://github.com/ringzerosec/jev-runtime-security/trace/schema/v1.json",
   "title": "Ring Zero trace record, version 1",
   "type": "object",
   "required": [

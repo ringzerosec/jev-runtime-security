@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-REPO="ringzerosec/jev-agentic-security"
+REPO="ringzerosec/jev-runtime-security"
 INSTALL_DIR=$(mktemp -d)
 trap 'rm -rf "$INSTALL_DIR"' EXIT
 

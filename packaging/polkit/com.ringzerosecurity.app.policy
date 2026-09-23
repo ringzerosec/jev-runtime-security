@@ -31,7 +31,7 @@
 <policyconfig>
 
   <vendor>Ring Zero Security</vendor>
-  <vendor_url>https://github.com/ringzerosec/jev-agentic-security</vendor_url>
+  <vendor_url>https://github.com/ringzerosec/jev-runtime-security</vendor_url>
   <icon_name>ringzero-app</icon_name>
 
   <action id="com.ringzerosecurity.app.run-rz">

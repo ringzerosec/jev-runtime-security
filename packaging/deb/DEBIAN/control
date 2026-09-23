@@ -7,8 +7,8 @@ Depends: libc6, libgcc-s1
 Recommends: bpftool, linux-tools-generic, curl
 Maintainer: Ring Zero Security <abhijit@ringzerosecurity.com>
 Homepage: https://ringzerosecurity.com
-Vcs-Git: https://github.com/ringzerosec/jev-agentic-security
-Vcs-Browser: https://github.com/ringzerosec/jev-agentic-security
+Vcs-Git: https://github.com/ringzerosec/jev-runtime-security
+Vcs-Browser: https://github.com/ringzerosec/jev-runtime-security
 Description: Ring Zero Security — kernel-level runtime security for AI coding agents
  Ring Zero Security monitors and controls AI coding agent behavior at the OS
  level. See what your AI tools access, block what they shouldn't. Enforcement

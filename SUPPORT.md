@@ -291,6 +291,6 @@ bypassable.
 
 ## Getting help
 
-- Questions and bugs: [open an issue](https://github.com/ringzerosec/jev-agentic-security/issues).
+- Questions and bugs: [open an issue](https://github.com/ringzerosec/jev-runtime-security/issues).
 - Vulnerabilities: **security@ringzerosecurity.com**, never a public issue. See
   [SECURITY.md](SECURITY.md).

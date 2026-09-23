@@ -1,6 +1,6 @@
 [Unit]
 Description=Ring Zero Security Daemon
-Documentation=https://github.com/ringzerosec/jev-agentic-security
+Documentation=https://github.com/ringzerosec/jev-runtime-security
 After=network.target
 StartLimitIntervalSec=300
 StartLimitBurst=5

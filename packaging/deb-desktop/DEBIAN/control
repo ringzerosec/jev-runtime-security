@@ -7,8 +7,8 @@ Depends: ringzero-security (= 0.1.0), libwebkit2gtk-4.1-0, libgtk-3-0t64 | libgt
 Recommends: pkexec | policykit-1
 Maintainer: Ring Zero Security <abhijit@ringzerosecurity.com>
 Homepage: https://ringzerosecurity.com
-Vcs-Git: https://github.com/ringzerosec/jev-agentic-security
-Vcs-Browser: https://github.com/ringzerosec/jev-agentic-security
+Vcs-Git: https://github.com/ringzerosec/jev-runtime-security
+Vcs-Browser: https://github.com/ringzerosec/jev-runtime-security
 Description: Ring Zero Security — desktop viewer
  A desktop window over the local Ring Zero daemon: agent sessions, the event
  timeline, detected threats, the review queue and daemon status.

@@ -1,6 +1,6 @@
 # ringzero
 
-[![build](https://github.com/ringzerosec/jev-agentic-security/actions/workflows/ci.yml/badge.svg)](https://github.com/ringzerosec/jev-agentic-security/actions/workflows/ci.yml)
+[![build](https://github.com/ringzerosec/jev-runtime-security/actions/workflows/ci.yml/badge.svg)](https://github.com/ringzerosec/jev-runtime-security/actions/workflows/ci.yml)
 [![userspace: Apache-2.0](https://img.shields.io/badge/userspace-Apache--2.0-blue)](LICENSE)
 [![kernel: GPL-2.0](https://img.shields.io/badge/kernel-GPL--2.0-blue)](GPL/LICENSE)
 [![platform: linux](https://img.shields.io/badge/platform-linux-lightgrey)](SUPPORT.md)

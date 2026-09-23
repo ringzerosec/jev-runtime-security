@@ -317,7 +317,7 @@ else
 fi
 
 echo "  Config:     /etc/ringzero/daemon.toml"
-echo "  Docs:       https://github.com/ringzerosec/jev-agentic-security"
+echo "  Docs:       https://github.com/ringzerosec/jev-runtime-security"
 echo "  Uninstall:  sudo apt remove ringzero-security"
 echo ""
 
