@@ -65,7 +65,7 @@ source before relying on any hook for enforcement.
 
 ## Kernel requirements
 
-- Linux 5.8 or newer (BPF LSM, ring buffers, CO-RE).
+- Linux 6.4 or newer (BPF LSM, ring buffers, CO-RE).
 - `CONFIG_BPF_LSM=y` and `CONFIG_DEBUG_INFO_BTF=y` in the running kernel.
 - `bpf` present in the `lsm=` boot parameter (check
   `cat /sys/kernel/security/lsm`). Most distributions compile BPF LSM in but

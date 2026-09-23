@@ -47,6 +47,48 @@ These are documented limits of this release, not findings:
 - **Kernels before 6.4** fail to load the eBPF object, and the agent then runs
   in a degraded mode that refuses nothing. It says so at startup.
 
+## Known bypasses of the kernel layer
+
+Published deliberately. A security tool that names its own limits is worth more
+than one that waits for someone else to find them, and an operator who knows the
+edges can decide whether they matter.
+
+**Process-name matching is the root of trust, and it is weak.** An agent is
+identified by its `comm`, which is 16 bytes and which the process controls.
+`prctl(PR_SET_NAME)`, or simply copying the binary to another name, removes a
+process and everything it spawns from monitoring entirely. Everything else here
+rests on that identification. It is a heuristic, not an identity, and nothing in
+this project should be read as claiming otherwise.
+
+**A process can evict itself from tracking.** `agent_descendants` is an LRU
+bounded at 16384. A process that forks enough children can push its own entry
+out, after which its opens are no longer checked.
+
+**Three ways to reach a file without a `file_open` hook at all**, because the
+hook only fires on an open:
+
+- An already-open file descriptor passed over a unix socket by another process.
+- `process_vm_readv`, which reads another process's memory directly.
+- `O_PATH`, which skips the hook.
+
+**The taint map is a plain hash with no eviction.** `tainted_pids` stops
+accepting entries at 10000. Insert failures are counted and surfaced, but a
+machine past that point stops taking new taint.
+
+**Directory blocks are bounded at 12 levels.** This one now fails CLOSED: a path
+deeper than the walk can prove is treated as blocked rather than allowed. Before
+that it failed open, and a file thirteen directories under a blocked root was
+not blocked.
+
+**Enforcement posture is recorded, not enforced.** `rz enforcement
+set-default/set-category` writes a posture that nothing in the event pipeline
+reads today. Setting it to `block` blocks nothing. File-access rules are the
+only setting the kernel applies. The CLI and the UI say so at the point of use.
+
+**Exec and network connect are observe-only** unless the separately-gated
+`[scanner.write_scan] enforce` or `[egress] enforce` are turned on, and both are
+off by default.
+
 ## Supported versions
 
 This is a 0.x project. Fixes land on `main` and in the next tagged release.

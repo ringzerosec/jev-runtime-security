@@ -320,6 +320,47 @@ async fn handle_client(
             }
         }
         ClientRequest::SetNetworkMode { mode } => {
+            // Same gate as SetEnforceMode below. This had neither check, and
+            // the IPC socket accepts the operator uid by design, so an agent
+            // running as the developer could flip network mode with one line
+            // of JSON — a policy change from inside the thing being policed.
+            if peer_uid != 0 {
+                tracing::warn!(
+                    peer_uid,
+                    requested_mode = ?mode,
+                    "Refused IPC network-mode change from non-root peer"
+                );
+                send_msg(
+                    &mut write_half,
+                    &DaemonMessage::Error {
+                        message: "changing network mode requires root (try: sudo rz ...)".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            let caller = match peer_pid {
+                Some(pid) => crate::api::caller::classify_pid(pid),
+                None => crate::api::caller::Caller::Unresolved {
+                    reason: "SO_PEERCRED carried no pid".to_string(),
+                },
+            };
+            if !caller.may_mutate() {
+                tracing::warn!(
+                    peer_uid,
+                    ?peer_pid,
+                    requested_mode = ?mode,
+                    "Refused IPC network-mode change: caller could not be shown to be a human"
+                );
+                send_msg(
+                    &mut write_half,
+                    &DaemonMessage::Error {
+                        message: caller.refusal_message(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
             *network.mode.write().await = mode.clone();
             tracing::info!(mode = ?mode, "Network mode updated via IPC");
             send_msg(&mut write_half, &DaemonMessage::NetworkMode { mode }).await?;

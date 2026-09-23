@@ -203,18 +203,40 @@ every length, caps compression-pointer jumps, and is exercised against
 truncation at every offset and a self-referential pointer; malformed input
 yields no records rather than a guess.
 
-**Not built: the source of those answers.** Nothing calls `observe_response`
-yet, so the learned set is always empty and `taint_on_egress` stays off. Two
-candidates:
+**The source is built too: a BPF capture of DNS answers.** Two tracepoints on
+`recvfrom`, in the same object as the stdio capture, filtered to tracked agent
+processes and to datagrams whose SOURCE port is 53 — an answer comes from port
+53, so no connection tracking is needed. Verified on the VM: a tracked process
+resolving an allowlisted name produced `admitted=2 live=2`, and those addresses
+went into the kernel egress map.
 
-- A BPF capture of DNS responses on a `sys_exit_recvfrom`/`recvmsg` tracepoint
-  filtered to monitored processes, in the style of the existing stdio capture.
-  No new capability, but it needs the socket-to-port mapping at the tracepoint,
-  which the current hooks do not carry.
-- An `AF_PACKET` sniffer in the daemon for UDP port 53. Simpler to write, but it
-  needs `CAP_NET_RAW`, which the daemon does not have and which would be a
-  deliberate privilege widening to justify.
+`AF_PACKET` was considered and rejected. It would need `CAP_NET_RAW`, and it
+would see every packet on the host, including traffic from other users and
+applications with no connection to any agent. "Reads DNS answers for names you
+allowlisted" is a sentence this project can defend; "captures all network
+traffic" is not, in a product whose pitch is minimal privilege.
 
-Until one lands, egress narrowing has no usable allowlist for a CDN-fronted
-endpoint, `taint_on_egress` stays off, and this document does not claim it
-works.
+### When this does not work, and how you find out
+
+Three cases leave the learned set empty:
+
+- **Encrypted DNS.** With DNS over HTTPS or TLS there is no plaintext answer to
+  observe by any mechanism short of the TLS interception this project rejects.
+  `systemd-resolved` can be configured this way.
+- **A connected UDP socket** may hand `recvfrom` a null source address, in which
+  case the answer cannot be identified as one without tracking the connection.
+  Such answers are dropped rather than guessed at.
+- **Resolution in a child process.** Capture is scoped to tracked agent pids.
+  Node resolves in-process, so the model API — the case that matters — is
+  covered. A helper like `curl` resolves in its own process and is not captured;
+  that is acceptable here, because a helper reaching an external host is
+  supposed to taint rather than be allowlisted.
+
+**It fails loudly.** With `taint_on_egress` on, if five minutes after startup no
+answer has been observed for any name in `allow_names`, the daemon warns that
+hostname allowlisting is not working on this host, names encrypted DNS as the
+likely cause, says that every session will be tainted and everything
+off-allowlist refused, and gives the fallback: list literal addresses in
+`[egress] allow`, or turn `taint_on_egress` off. A feature that quietly does
+nothing is the failure mode this project keeps hitting; this one has a known
+cause that can be named in advance.

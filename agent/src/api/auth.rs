@@ -67,6 +67,16 @@ impl Scope {
 const READONLY_SAFE_POSTS: &[&str] = &[
     "/api/v1/skill-scan/auto", // inventory agent skill surfaces (read-only scan)
     "/api/v1/dlp/redact",      // redaction dry-run / test (no state change)
+    // The agent hook reports what a tool call is about to do. It can only ever
+    // hold the operator's READ-ONLY token — the full-scope one is root-only by
+    // design and a hook runs as the developer — so requiring Full made every
+    // hook POST 403, and rz-hook fails open on error. Blocking mode could not
+    // work at all on a stock install.
+    //
+    // It is safe to downgrade: the handler records an event and returns a
+    // decision. It changes no policy, and the decision it returns can only
+    // deny a tool call, never widen anything.
+    "/api/v1/hook-event",
 ];
 
 /// The scope a request requires, from its method + path.

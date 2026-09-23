@@ -150,7 +150,12 @@ const ACTION_CONFIG: Record<
   },
   block: {
     label: 'Block',
-    hint: 'Block at kernel level',
+    // NOT a kernel block. Nothing in the event pipeline reads this posture
+    // today (agent/src/enforcement.rs::evaluate_event is unreferenced), so
+    // this records an intent and refuses nothing. File-access rules are the
+    // only setting the kernel enforces. Saying otherwise put a false claim on
+    // a screenshot.
+    hint: 'Record as a violation (not enforced — use File Access rules to block)',
     color: 'text-red-700',
     bg: 'bg-red-50',
     ring: 'ring-red-300',

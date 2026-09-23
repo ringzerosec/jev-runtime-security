@@ -46,6 +46,35 @@ fi
 
 systemctl daemon-reload
 
+# Detach eBPF programs before removing anything else.
+#
+# WHY THIS EXISTS. Stopping the daemon does not remove its kernel programs.
+# cgroup programs in particular persist beyond process exit, so without this a
+# source install could be "uninstalled" and leave enforcement attached to the
+# kernel with nothing left running to manage, inspect or disable it. The .deb
+# path has always done this in packaging/deb/DEBIAN/prerm; this script did not,
+# which meant the two removal paths disagreed on whether the machine was
+# actually left clean. Keep them in step.
+if command -v bpftool &>/dev/null; then
+  for id in $(bpftool prog list 2>/dev/null | grep -E 'ringzero_' | awk '{print $1}' | tr -d ':'); do
+    bpftool prog detach id "$id" type lsm 2>/dev/null || true
+  done
+  for cgroup_path in /sys/fs/cgroup /sys/fs/cgroup/unified; do
+    if [[ -d "$cgroup_path" ]]; then
+      bpftool cgroup detach "$cgroup_path" connect4 2>/dev/null || true
+      bpftool cgroup detach "$cgroup_path" connect6 2>/dev/null || true
+      bpftool cgroup detach "$cgroup_path" sock_ops 2>/dev/null || true
+    fi
+  done
+  info "Detached eBPF programs"
+else
+  warn "bpftool not found — could not detach eBPF programs. If enforcement"
+  warn "appears to still be active, reboot to clear them."
+fi
+
+# Remove pinned BPF objects
+[[ -d /sys/fs/bpf/ringzero ]] && rm -rf /sys/fs/bpf/ringzero 2>/dev/null || true
+
 # Remove binaries
 for bin in /usr/bin/ringzero-daemon /usr/bin/rz /usr/bin/rz-hook /usr/bin/ringzero-app; do
   [[ -f "$bin" ]] && rm "$bin" && info "Removed $bin"

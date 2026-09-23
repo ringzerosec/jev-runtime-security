@@ -197,6 +197,8 @@ pub struct CaptureContext {
     pub max_event_bytes: usize,
     /// Where a flagged fragment goes for a human to label.
     pub review: Option<std::sync::Arc<crate::review::ReviewQueue>>,
+    /// The hostname allowlist, fed from observed DNS answers.
+    pub dns: Option<std::sync::Arc<tokio::sync::Mutex<crate::dns_allow::DnsAllowManager>>>,
 }
 
 pub fn spawn(
@@ -239,6 +241,10 @@ async fn run(
         ("trace_exit_read", "syscalls", "sys_exit_read"),
         ("trace_enter_write", "syscalls", "sys_enter_write"),
         ("trace_exit_write", "syscalls", "sys_exit_write"),
+        // DNS answer capture rides in the same object: it needs the same
+        // enter/exit tracepoint machinery and the same tracked-pid set.
+        ("trace_enter_recvfrom", "syscalls", "sys_enter_recvfrom"),
+        ("trace_exit_recvfrom", "syscalls", "sys_exit_recvfrom"),
     ];
 
     let mut attached = 0u32;
@@ -276,6 +282,15 @@ async fn run(
     let mut ring_buf =
         RingBuf::try_from(events_map).context("Failed to create RingBuf from stdio_events")?;
 
+    let mut dns_ring = bpf
+        .take_map("dns_events")
+        .and_then(|m| RingBuf::try_from(m).ok());
+    if dns_ring.is_some() {
+        info!("DNS answer capture attached (source port 53, tracked agents only)");
+    } else {
+        warn!("dns_events ring buffer unavailable — hostname allowlisting will not learn");
+    }
+
     info!("stdio capture polling started");
 
     // ── Event loop ──────────────────────────────────────────────────────────
@@ -287,6 +302,29 @@ async fn run(
         while let Ok(pid) = pid_rx.try_recv() {
             if tracked_pids.insert(pid, 1u8, 0).is_ok() {
                 debug!(pid, "stdio: tracking agent PID");
+            }
+        }
+
+        // Drain DNS answers. Each is fed to the name allowlist, which admits
+        // the addresses that answered for an allowlisted name.
+        if let Some(rb) = dns_ring.as_mut() {
+            let mut n = 0u32;
+            while n < 64 {
+                let Some(item) = rb.next() else { break };
+                n += 1;
+                let data: &[u8] = item.as_ref();
+                // timestamp_ns(8) + pid(4) + len(4) then the payload.
+                if data.len() < 16 {
+                    continue;
+                }
+                let len = u32::from_ne_bytes([data[12], data[13], data[14], data[15]]) as usize;
+                let end = 16 + len.min(data.len().saturating_sub(16));
+                if len == 0 || end <= 16 {
+                    continue;
+                }
+                if let Some(dns) = ctx.dns.as_ref() {
+                    dns.lock().await.observe_response(&data[16..end]).await;
+                }
             }
         }
 

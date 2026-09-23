@@ -559,13 +559,20 @@ static __always_inline int is_ai_agent(const char *comm) {
 // Raise taint on a pid. Raise-only: an existing entry is never downgraded, and
 // has_keys is never cleared, because taint may narrow authority and never widen
 // it. The kernel drops the entry on process exit, which is not a downgrade.
+// Drop counter slot 1: taint insertions the map refused. `tainted_pids` is a
+// plain HASH capped at 10000 with no eviction, so once it fills, new taint is
+// silently lost — which would look exactly like a process that never ingested
+// anything. Counted so the failure is visible instead of invisible.
+#define DROP_TAINT_INSERT 1
+
 static __always_inline void raise_taint(u32 pid, u32 now_s) {
     struct taint_info *ex = bpf_map_lookup_elem(&tainted_pids, &pid);
     if (!ex) {
         struct taint_info ni = {};
         ni.tainted = 1;
         ni.taint_time = now_s;
-        bpf_map_update_elem(&tainted_pids, &pid, &ni, BPF_ANY);
+        if (bpf_map_update_elem(&tainted_pids, &pid, &ni, BPF_ANY) < 0)
+            inc_drop_counter(DROP_TAINT_INSERT);
     } else if (!ex->tainted) {
         struct taint_info ni = *ex;
         ni.tainted = 1;
@@ -712,6 +719,46 @@ static __always_inline int is_monitored_current(const char *comm) {
         || bpf_map_lookup_elem(&agent_descendants, &pid) != 0;
 }
 
+// Is this dentry inside a blocked directory?
+//
+// FAILS CLOSED ON TRUNCATION, and that is the point. The walk is bounded at
+// MAX_DIR_WALK because the verifier needs a fixed bound, and it used to simply
+// fall out of the loop and report "not blocked". A file thirteen directories
+// under a blocked root was therefore not blocked — the depth of a path decided
+// whether policy applied to it, which is not a property anyone would choose.
+//
+// Running out of levels means we could not PROVE the file is outside a blocked
+// directory. That is a denial, not a pass.
+//
+// Returns 1 to block, 0 to allow.
+#define MAX_DIR_WALK 12
+static __always_inline int dentry_under_blocked_dir(struct dentry *dentry) {
+    struct ino_key bdir_probe = {};
+    if (!bpf_map_lookup_elem(&blocked_dir_inodes, &bdir_probe))
+        return 0; // no directory blocks configured at all
+
+    struct dentry *walk = BPF_CORE_READ(dentry, d_parent);
+    #pragma unroll
+    for (int i = 0; i < MAX_DIR_WALK; i++) {
+        if (!walk)
+            return 0; // reached the top cleanly: genuinely not inside one
+        struct dentry *wp = BPF_CORE_READ(walk, d_parent);
+        if (wp == walk)
+            return 0; // root reached cleanly
+        struct inode *dir_inode = BPF_CORE_READ(walk, d_inode);
+        if (dir_inode) {
+            struct ino_key dk = {};
+            dk.ino = BPF_CORE_READ(dir_inode, i_ino);
+            dk.dev = BPF_CORE_READ(dir_inode, i_sb, s_dev);
+            if (bpf_map_lookup_elem(&blocked_dir_inodes, &dk))
+                return 1;
+        }
+        walk = wp;
+    }
+    // Ran out of levels with more path above us. Unproven, so denied.
+    return 1;
+}
+
 // Check if a dentry is protected — either its basename is in blocked_files,
 // its inode is in blocked_inodes, or it lives inside a blocked directory.
 // Used by file_open, inode_create, inode_unlink, inode_rename to enforce
@@ -736,26 +783,9 @@ static __always_inline int is_dentry_protected(struct dentry *dentry) {
             return 1;
     }
 
-    // Check if inside a blocked directory
-    struct ino_key bdir_probe = {};
-    if (bpf_map_lookup_elem(&blocked_dir_inodes, &bdir_probe)) {
-        struct dentry *walk = BPF_CORE_READ(dentry, d_parent);
-        #pragma unroll
-        for (int i = 0; i < 12; i++) {
-            if (!walk) break;
-            struct dentry *wp = BPF_CORE_READ(walk, d_parent);
-            if (wp == walk) break;
-            struct inode *dir_inode = BPF_CORE_READ(walk, d_inode);
-            if (dir_inode) {
-                struct ino_key dk = {};
-                dk.ino = BPF_CORE_READ(dir_inode, i_ino);
-                dk.dev = BPF_CORE_READ(dir_inode, i_sb, s_dev);
-                if (bpf_map_lookup_elem(&blocked_dir_inodes, &dk))
-                    return 1;
-            }
-            walk = wp;
-        }
-    }
+    // Check if inside a blocked directory. Fails closed on truncation.
+    if (dentry_under_blocked_dir(dentry))
+        return 1;
 
     return 0;
 }
@@ -1099,25 +1129,9 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
         struct ino_key bdir_probe = {};
         u8 *bdir_active = bpf_map_lookup_elem(&blocked_dir_inodes, &bdir_probe);
         if (bdir_active) {
-            int in_blocked = 0;
-            struct dentry *bwalk = BPF_CORE_READ(dentry, d_parent);
-            #pragma unroll
-            for (int i = 0; i < 12; i++) {
-                if (!bwalk) break;
-                struct dentry *bwp = BPF_CORE_READ(bwalk, d_parent);
-                if (bwp == bwalk) break;
-                struct inode *bdir_inode = BPF_CORE_READ(bwalk, d_inode);
-                if (bdir_inode) {
-                    struct ino_key bdk = {};
-                    bdk.ino = BPF_CORE_READ(bdir_inode, i_ino);
-                    bdk.dev = BPF_CORE_READ(bdir_inode, i_sb, s_dev);
-                    if (bpf_map_lookup_elem(&blocked_dir_inodes, &bdk)) {
-                        in_blocked = 1;
-                        break;
-                    }
-                }
-                bwalk = bwp;
-            }
+            // Same helper, so truncation denies here too rather than in only
+            // one of the three places this walk used to be written out.
+            int in_blocked = dentry_under_blocked_dir(dentry);
             if (in_blocked) {
                 e->blocked = 1;
                 bpf_ringbuf_submit(e, 0);

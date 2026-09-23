@@ -668,7 +668,9 @@ enum Commands {
         action: ReviewCommands,
     },
 
-    /// Enforcement posture — per-category threat response (observe/alert/block)
+    /// Enforcement posture — what a category is RECORDED as. Not a kernel
+    /// control: nothing in the event pipeline reads this today, so `block`
+    /// refuses nothing. Use `rz file-access` for enforcement.
     Enforcement {
         #[command(subcommand)]
         action: EnforcementCommands,
@@ -770,7 +772,8 @@ enum BaselineCommands {
 enum PolicyCommands {
     /// Show current policy
     Show,
-    /// Block a domain
+    /// Add a domain to the blocklist. RECORDED ONLY: the connect hook is
+    /// observe-only, so this does not refuse the connection.
     BlockDomain { domain: String },
     /// Set enforcement mode (observe|enforce)
     SetMode { mode: String },
@@ -1291,7 +1294,9 @@ async fn cmd_network_show(api: &str) -> Result<()> {
     println!(
         "  Enforce: {}",
         if enforce == "enforce" {
-            "\x1b[31menforce\x1b[0m (violations blocked)"
+            // The connect hook is observe-only, so "enforce" here means the
+            // violation is recorded as one, not that it was refused.
+            "\x1b[31menforce\x1b[0m (violations recorded, not refused)"
         } else {
             "\x1b[33mobserve\x1b[0m (violations logged)"
         }
@@ -2149,7 +2154,12 @@ async fn cmd_enforcement_set(api: &str, category: Option<&str>, action: &str) ->
         None => println!("Enforcement default → {}", color_action(action)),
         Some(cat) => println!("Enforcement {cat} → {}", color_action(action)),
     }
-    println!("  saved to daemon.toml — reload to apply: sudo systemctl reload ringzero-daemon");
+    println!("  saved to daemon.toml — reload to persist: sudo systemctl reload ringzero-daemon");
+    println!(
+        "  \x1b[33mNote:\x1b[0m this posture is recorded, not enforced. Nothing in the event \
+         pipeline acts on it today."
+    );
+    println!("  For enforcement that the kernel applies, use: rz file-access add <path> block");
     Ok(())
 }
 

@@ -200,11 +200,30 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
 
   // Enforcement-derived
   const cats = enforcement?.categories;
+  // Categories set to alert/block are ADVISORY labels applied to the trace.
+  // They are counted here as what they are, and deliberately not used to
+  // decide the protection status below.
   const protectionRulesCount = cats
     ? (Object.values(cats) as string[]).filter((v) => v === 'alert' || v === 'block').length
     : 0;
-  const hasBlock = cats ? (Object.values(cats) as string[]).some((v) => v === 'block') : false;
-  const protectionStatus: 'protected' | 'monitoring' | 'unprotected' = hasBlock
+
+  // PROTECTION STATUS MUST REFLECT THE KERNEL, NOT A CONFIG FILE.
+  //
+  // This used to read "Protected — kernel-level enforcement is active" whenever
+  // any threat category was set to "block". That was false twice over: the
+  // function that would act on those categories is never called at runtime, and
+  // even by its own design it only relabels a trace record in userspace. An
+  // operator could be shown a green shield while nothing was being refused.
+  //
+  // The only field in /status that describes the kernel honestly is whether the
+  // eBPF programs are loaded. Note `enforce_mode` is NOT usable here: it is a
+  // boolean about the userspace ACL engine's default-deny setting, and that
+  // engine is observe-only, so it would be a second false signal. The real
+  // kernel posture (enforce_blocks, derived from daemon.mode) is not currently
+  // exposed by the status endpoint; until it is, this deliberately claims less
+  // than it could rather than more.
+  const ebpfActive = status?.ebpf_active === true || status?.kernel_monitoring === 'active';
+  const protectionStatus: 'protected' | 'monitoring' | 'unprotected' = ebpfActive
     ? 'protected'
     : daemonConnected
       ? 'monitoring'
@@ -275,7 +294,7 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
           icon={Scan}
         />
         <StatCard
-          label="Protection Rules"
+          label="Categories Flagged"
           value={protectionRulesCount}
           accent="text-blue-600"
           icon={Lock}
@@ -345,7 +364,7 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
               </p>
               <p className="text-xs text-muted-foreground">
                 {protectionStatus === 'protected'
-                  ? 'Kernel-level enforcement is active for one or more categories'
+                  ? 'Kernel file rules are being enforced. Exec, network and process activity is recorded, not refused.'
                   : protectionStatus === 'monitoring'
                     ? 'Daemon is running and observing agent activity'
                     : 'Start the daemon to begin monitoring'}

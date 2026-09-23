@@ -46,11 +46,18 @@ Block or allow specific files for AI-agent processes (pushed straight to eBPF).
 - `rz scan skills` — scan installed agent skills / plugins / MCP servers for
   prompt-injection and supply-chain risk (e.g. a hijacked `*claw*` skill).
 
+## What actually enforces
+
+Only **file-access rules** are enforced by the kernel. `rz enforcement
+set-default/set-category` records a posture that nothing in the event pipeline
+reads today, so setting it to `block` blocks nothing. Do not tell an operator a
+machine is locked down on the strength of it.
+
 ## Common requests → commands
 | Ask | Command |
 |---|---|
 | "Is Ring Zero running / healthy?" | `rz status` |
-| "Lock it down / harden everything" | `rz enforcement set-default block` then reload |
+| "Lock it down / harden everything" | `rz file-access add '<path>' block` for each path that matters — file-access rules are the only setting the kernel actually enforces |
 | "Stop agents reading my SSH keys" | `rz file-access add '*id_rsa' block` |
 | "What got blocked recently?" | `rz threats` |
 | "Audit the agent skills on this box" | `rz scan skills` |

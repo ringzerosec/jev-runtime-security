@@ -341,6 +341,12 @@ impl DnsAllowManager {
         );
     }
 
+    /// How many addresses are currently admitted. Zero a few minutes after
+    /// startup means hostname allowlisting is not working on this host.
+    pub fn learned_count(&self) -> usize {
+        self.learned.len()
+    }
+
     /// Drop expired entries from both the local set and the kernel map.
     pub async fn expire_now(&mut self) {
         let gone = self.learned.expire(Instant::now());

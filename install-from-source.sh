@@ -259,7 +259,18 @@ else
 fi
 
 # The daemon runs as root; config and state are root-only.
-chmod -R 0750 /etc/ringzero
+# Deliberately NOT `chmod -R 0750 /etc/ringzero`.
+#
+# A recursive chmod widens key files to group-readable, and the daemon then
+# refuses to start, because load_key() rejects any key file with a group or
+# world bit set. On a re-run over an existing install it would take a 0600
+# typesafe.key down to 0750 and break the machine in a way whose error message
+# points nowhere near the installer. Set directories and ordinary files
+# separately, and leave every key at 0600. The .deb postinst does the same.
+find /etc/ringzero -mindepth 1 -type d -exec chmod 0750 {} +
+find /etc/ringzero -mindepth 1 -type f ! -name '*.key' -exec chmod 0640 {} +
+find /etc/ringzero -mindepth 1 -type f -name '*.key' -exec chmod 0600 {} +
+chmod 0750 /etc/ringzero
 chmod 0750 /var/lib/ringzero
 chmod 0750 /var/log/ringzero
 
@@ -289,15 +300,33 @@ EOF
   systemctl enable ringzero-daemon
   systemctl restart ringzero-daemon
 
-  # Copy the daemon's API token to the operator's home so the desktop app and
-  # rz-hook can authenticate against the local HTTP API.
+  # Give the operator the READ-ONLY token, so the desktop app and rz-hook can
+  # read from the local HTTP API.
+  #
+  # THIS MUST NEVER BE THE FULL-SCOPE TOKEN. An AI coding agent runs as the same
+  # Unix user as the operator, so anything in that user's home is in the agent's
+  # reach. A full token there would hand the agent the credential needed to turn
+  # enforcement off, which defeats the entire point of the product. The full
+  # token stays root-only at /var/lib/ringzero/api-token, and changing policy
+  # goes through `sudo rz ...`.
+  #
+  # This script copied the full token until 2026-09-23. The .deb postinst always
+  # did the right thing, so only source installs were affected — which is to say
+  # most people building from the public repo. Keep the two installers in step.
   sleep 1
-  if [[ -n "$OP_UID" && "$OP_UID" != "0" && -f /var/lib/ringzero/api-token ]]; then
+  if [[ -n "$OP_UID" && "$OP_UID" != "0" && -f /var/lib/ringzero/api-token-readonly ]]; then
     op_home=$(getent passwd "$OP_UID" | cut -d: -f6)
     if [[ -n "$op_home" ]]; then
-      install -d -m 0700 -o "$OP_UID" -g "$OP_UID" "$op_home/.config/ringzero"
-      install -m 0600 -o "$OP_UID" -g "$OP_UID" /var/lib/ringzero/api-token "$op_home/.config/ringzero/api-token"
-      info "API token copied to $op_home/.config/ringzero/api-token"
+      dest="$op_home/.config/ringzero"
+      # Never follow an operator-placed symlink while writing as root.
+      if [[ -L "$op_home/.config" || -L "$dest" || -L "$dest/api-token" ]]; then
+        warn "Skipping API token copy: $dest contains a symlink"
+      else
+        install -d -m 0700 -o "$OP_UID" -g "$OP_UID" "$dest"
+        install -m 0600 -o "$OP_UID" -g "$OP_UID" \
+          /var/lib/ringzero/api-token-readonly "$dest/api-token"
+        info "Read-only API token copied to $dest/api-token"
+      fi
     fi
   fi
 fi
