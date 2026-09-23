@@ -110,6 +110,33 @@ sudo apt install ./ringzero-security_<version>_<arch>.deb
 rz status                  # daemon + kernel programs
 ```
 
+### What the install changes outside its own files, and how to say no
+
+Installing a security product should not mean finding out afterwards which of
+your files it rewrote. Three things the package does touch live outside
+`/etc/ringzero`, and each one has an opt-out:
+
+| Variable | What it stops | What that costs |
+| --- | --- | --- |
+| `RZ_NO_GRUB=1` | Editing `/etc/default/grub` to add `bpf` to `lsm=` | Kernel enforcement stays off until you add it yourself |
+| `RZ_NO_SHELL_RC=1` | Appending the gateway line to `~/.bashrc` / `~/.zshrc` | Login shells still get it from `/etc/profile.d`; other shells do not |
+| `RZ_INSTALL_AGENT_HOOKS=1` | *(opt-in, off by default)* writing a hook into Claude Code or Codex config | Without it `[checks] blocking = true` does nothing — see below |
+
+```sh
+sudo RZ_NO_GRUB=1 apt install ./ringzero-security_<version>_<arch>.deb
+```
+
+`install.sh` verifies the downloaded `.deb` against the `SHA256SUMS-<arch>.txt`
+published with the release, and **refuses to install** if that file is missing
+or the hash does not match, rather than warning and continuing. If you are
+deliberately installing something unpublished, `RZ_SKIP_CHECKSUM=1` says so out
+loud.
+
+The install does **not** generate any signing key. An earlier version wrote an
+Ed25519 keypair to `/etc/ringzero/keys` and said the daemon verified eBPF
+objects with it; nothing verified anything, so the key and the claim are both
+gone, and an upgrade deletes the leftover files.
+
 The daemon package depends on `libc6` and `libgcc-s1` and nothing else, so a
 server stays free of a GUI stack. The desktop viewer is a **separate** package:
 

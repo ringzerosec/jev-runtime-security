@@ -121,6 +121,40 @@ fi
 
 info "Downloaded $(du -h "$INSTALL_DIR/$DEB_NAME" | cut -f1)"
 
+# ── Verify the download before handing it to dpkg as root ───────────────────
+#
+# This script is run as `curl ... | sudo bash`, and dpkg runs maintainer
+# scripts as root. Installing a package nobody checked means trusting the
+# transport and whatever served it. The release workflow already publishes
+# SHA256SUMS next to the .deb, so there is a checksum to check and no reason
+# not to.
+#
+# A missing SHA256SUMS is a REFUSAL, not a warning. "Could not verify, carrying
+# on anyway" is the same as not verifying, and it is worse because it looks
+# like a check happened. RZ_SKIP_CHECKSUM=1 exists for someone deliberately
+# installing an unpublished build, and it says loudly what it is doing.
+# The release workflow publishes one sums file per architecture.
+SUMS_NAME="SHA256SUMS-${DEB_ARCH}.txt"
+SUMS_URL="https://github.com/$REPO/releases/download/$LATEST/$SUMS_NAME"
+if [[ "${RZ_SKIP_CHECKSUM:-0}" == "1" ]]; then
+  warn "RZ_SKIP_CHECKSUM=1 — installing a package that has NOT been verified."
+else
+  info "Verifying checksum..."
+  SUMS_FILE="$INSTALL_DIR/SHA256SUMS"
+  if ! $FETCH "$SUMS_URL" > "$SUMS_FILE" 2>/dev/null || [[ ! -s "$SUMS_FILE" ]]; then
+    die "Could not fetch $SUMS_NAME from $SUMS_URL — refusing to install an unverified package. Re-run with RZ_SKIP_CHECKSUM=1 only if you know why it is missing."
+  fi
+  EXPECTED="$(grep -F " $DEB_NAME" "$SUMS_FILE" | awk '{print $1}' | head -1)"
+  [[ -n "$EXPECTED" ]] || die "$SUMS_NAME has no entry for $DEB_NAME — refusing to install."
+  command -v sha256sum &>/dev/null || die "sha256sum not found — cannot verify the download."
+  ACTUAL="$(sha256sum "$INSTALL_DIR/$DEB_NAME" | awk '{print $1}')"
+  if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+    rm -f "$INSTALL_DIR/$DEB_NAME"
+    die "CHECKSUM MISMATCH for $DEB_NAME. Expected $EXPECTED, got $ACTUAL. The download has been deleted and nothing was installed."
+  fi
+  info "Checksum verified"
+fi
+
 # ── Install ──────────────────────────────────────────────────────────────────
 
 info "Installing Ring Zero Security..."

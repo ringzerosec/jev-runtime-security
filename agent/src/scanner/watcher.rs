@@ -98,6 +98,21 @@ fn watch_paths() -> Vec<PathBuf> {
 /// Scan a single file for SkillSpector patterns when it changes.
 /// Returns findings if any patterns matched. Caps at 16 MiB to avoid OOM.
 pub fn scan_changed_file(path: &std::path::Path) -> Vec<PatternFinding> {
+    // NEVER scan the agent's own journal.
+    //
+    // This watcher covers `.claude`, which contains `.claude/projects/*/*.jsonl`
+    // — the running transcript. That file is the union of everything the session
+    // handled, so it trips credential and exfiltration patterns constantly and
+    // for entirely innocent reasons. Measured: a session that merely read a file
+    // through an MCP server produced ten findings, two of them HIGH or CRITICAL,
+    // none of them about anything the agent did wrong.
+    //
+    // The same carve-out already existed for write-scanning; it was never
+    // applied here, so the review queue filled with the agent describing its own
+    // work back to us. Skills, rules and MCP configs stay in scope.
+    if crate::write_scan::is_agent_journal(&path.to_string_lossy()) {
+        return vec![];
+    }
     let content = match crate::fscache::read_to_string(path) {
         Ok(c) if c.len() <= 16 * 1024 * 1024 => c,
         _ => return vec![],

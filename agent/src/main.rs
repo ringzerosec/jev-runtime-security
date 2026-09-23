@@ -2499,6 +2499,7 @@ async fn async_main() -> Result<()> {
         transcript_taint::spawn(transcript_taint::WatchContext {
             cfg: cfg.transcript_watch.clone(),
             ebpf: Arc::clone(&ebpf_cmd_tx),
+            started_at: std::time::SystemTime::now(),
         });
     } else {
         tracing::info!("Transcript taint watcher off ([transcript_watch] enabled = false)");

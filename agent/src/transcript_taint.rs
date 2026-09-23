@@ -129,6 +129,9 @@ pub struct WatchContext {
     pub ebpf: std::sync::Arc<
         tokio::sync::RwLock<Option<tokio::sync::mpsc::Sender<crate::ebpf_loader::EbpfCommand>>>,
     >,
+    /// When the watcher started. Used to tell a transcript that already existed
+    /// (history, skip it) from one created since (a live session, read it all).
+    pub started_at: std::time::SystemTime,
 }
 
 /// Per-transcript position and identity.
@@ -208,10 +211,29 @@ async fn drain_transcript(ctx: &WatchContext, path: &Path, tails: &mut HashMap<P
     let ino = meta.ino();
 
     let tail = tails.entry(path.to_path_buf()).or_insert_with(|| {
-        // FIRST SIGHT: seek to the end. History is not replayed into a taint
-        // storm; only what lands while we watch counts.
+        // FIRST SIGHT. Two different cases, and treating them the same was a
+        // real bug: a brand-new session was invisible.
+        //
+        // A transcript that already existed when we started watching is
+        // history. Replaying it would raise taint for work that finished long
+        // ago, so we seek to the end.
+        //
+        // A transcript CREATED since we started watching is a live session, and
+        // its opening records are not history at all — they are the session
+        // happening right now. Seeking to the end there skipped everything
+        // written before our first poll, which for a short session is the whole
+        // thing. Measured: a real Claude Code run using an MCP server produced
+        // mcp__files__read_text_file in its transcript and raised no taint,
+        // because the file was created and the tool called between two polls.
+        //
+        // So: created after we started => read from the beginning.
+        let created_since_start = meta
+            .created()
+            .or_else(|_| meta.modified())
+            .map(|t| t >= ctx.started_at)
+            .unwrap_or(false);
         Tail {
-            offset: size,
+            offset: if created_since_start { 0 } else { size },
             ino,
             partial: String::new(),
         }

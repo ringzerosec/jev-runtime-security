@@ -1,5 +1,5 @@
 #!/bin/bash
-# Post-install: eBPF kernel setup, signing keys, services
+# Post-install: eBPF kernel setup, services, gateway
 set -e
 
 BOLD="\033[1m"
@@ -24,28 +24,27 @@ chmod 0750 /var/log/ringzero 2>/dev/null || true
 
 info "Directories configured"
 
-# ── 2. eBPF signing keys ────────────────────────────────────────────────────
-# Generate a machine-local Ed25519 keypair for eBPF program signing.
-# The private key stays on this machine; the public key is used by the
-# daemon to verify eBPF objects at load time.
-
-KEYS_DIR="/etc/ringzero/keys"
-if [ ! -f "$KEYS_DIR/ebpf-signing.key" ]; then
-  mkdir -p "$KEYS_DIR"
-  chmod 0700 "$KEYS_DIR"
-
-  if command -v openssl &>/dev/null; then
-    openssl genpkey -algorithm Ed25519 -out "$KEYS_DIR/ebpf-signing.key" 2>/dev/null
-    openssl pkey -in "$KEYS_DIR/ebpf-signing.key" -pubout -out "$KEYS_DIR/ebpf-signing.pub" 2>/dev/null
-    chmod 0600 "$KEYS_DIR/ebpf-signing.key"
-    chmod 0644 "$KEYS_DIR/ebpf-signing.pub"
-    info "eBPF signing keypair generated"
-  else
-    warn "openssl not found — skipping eBPF signing key generation"
-    warn "Install openssl and run: dpkg --configure ringzero-security"
-  fi
-else
-  info "eBPF signing keys already exist — keeping"
+# ── 2. eBPF signing keys: REMOVED ───────────────────────────────────────────
+#
+# This step used to generate a machine-local Ed25519 keypair, and the comment
+# above it said the daemon verified eBPF objects with the public key at load
+# time. No such verification existed anywhere in the codebase — not in the
+# loader, not at startup, not anywhere. It was a security claim made by an
+# install script that the product did not implement.
+#
+# Rather than ship a half-built version of it, the key generation is gone and
+# so is the claim. Verifying BPF objects properly needs decisions this has not
+# made: who signs, how the trusted key reaches the machine, and what happens on
+# a mismatch. A locally generated keypair answers none of those — a key the
+# machine makes for itself attests to nothing.
+#
+# Any keypair an earlier install left behind is removed here. An unused file
+# called "ebpf-signing.key" in a security product is exactly the sort of thing
+# someone later mistakes for a working control.
+if [ -d /etc/ringzero/keys ]; then
+  rm -f /etc/ringzero/keys/ebpf-signing.key /etc/ringzero/keys/ebpf-signing.pub
+  rmdir /etc/ringzero/keys 2>/dev/null || true
+  info "Removed the unused eBPF signing keypair (nothing verified with it)"
 fi
 
 # ── 3. GRUB: enable BPF LSM permanently ─────────────────────────────────────
@@ -55,6 +54,19 @@ fi
 
 NEEDS_REBOOT=0
 GRUB_FILE="/etc/default/grub"
+
+# OPT-OUT, for consistency with agent hooks.
+#
+# Editing another vendor's config file is opt-in here (RZ_INSTALL_AGENT_HOOKS),
+# and it was inconsistent that editing the BOOT LOADER was not. Boot parameters
+# are a bigger commitment than a settings file: a mistake there costs a rescue
+# disk. RZ_NO_GRUB=1 skips it, and the install output says what that costs.
+if [ "${RZ_NO_GRUB:-0}" = "1" ]; then
+  warn "RZ_NO_GRUB=1 — not touching $GRUB_FILE."
+  warn "  BPF LSM will not be enabled at boot, so kernel enforcement stays off"
+  warn "  until you add 'bpf' to the lsm= list yourself. Check with: rz status"
+  RZ_GRUB_SKIPPED=1
+fi
 
 setup_bpf_lsm() {
   if [ ! -f "$GRUB_FILE" ]; then
@@ -142,9 +154,15 @@ if cat /sys/kernel/security/lsm 2>/dev/null | grep -q bpf; then
   info "BPF LSM is active in the running kernel"
 else
   warn "BPF LSM is not active in the running kernel"
-  setup_bpf_lsm
-  if [ "$NEEDS_REBOOT" -eq 0 ]; then
-    NEEDS_REBOOT=1  # still needs reboot even if GRUB update had issues
+  if [ "${RZ_GRUB_SKIPPED:-0}" = "1" ]; then
+    # Nothing was changed on disk, so a reboot would come back the same way.
+    # Telling someone to reboot here would be telling them to do nothing.
+    warn "  Kernel enforcement stays off until 'bpf' is in the lsm= list."
+  else
+    setup_bpf_lsm
+    if [ "$NEEDS_REBOOT" -eq 0 ]; then
+      NEEDS_REBOOT=1  # still needs reboot even if GRUB update had issues
+    fi
   fi
 fi
 
@@ -316,8 +334,16 @@ cat > "$GATEWAY_PROFILE" << 'GWEOF'
 GWEOF
 chmod 0644 "$GATEWAY_PROFILE"
 
-# Also add to operator's bashrc/zshrc for non-login shells
-if [ -n "$OP_UID" ] && [ "$OP_UID" != "0" ]; then
+# Also add to operator's bashrc/zshrc for non-login shells.
+#
+# OPT-OUT, same reasoning as GRUB and agent hooks: appending to somebody's
+# shell rc is editing a file they own and did not hand us. RZ_NO_SHELL_RC=1
+# skips it; the profile.d drop-in above still covers login shells, so the
+# gateway keeps working for anything that reads /etc/profile.d.
+if [ "${RZ_NO_SHELL_RC:-0}" = "1" ]; then
+  info "RZ_NO_SHELL_RC=1 — not editing ~/.bashrc or ~/.zshrc."
+  info "  Login shells still pick the gateway up from $GATEWAY_PROFILE."
+elif [ -n "$OP_UID" ] && [ "$OP_UID" != "0" ]; then
   op_home=$(getent passwd "$OP_UID" | cut -d: -f6)
   if [ -n "$op_home" ]; then
     MARKER="# Ring Zero Gateway"

@@ -18,7 +18,7 @@ case "$1" in
     systemctl daemon-reload 2>/dev/null || true
     ;;
   purge)
-    # Full cleanup: remove everything including config, data, and keys
+    # Full cleanup: remove everything including config and data
     rm -rf /var/run/ringzero 2>/dev/null || true
     rm -rf /var/lib/ringzero 2>/dev/null || true
     rm -rf /var/log/ringzero 2>/dev/null || true
