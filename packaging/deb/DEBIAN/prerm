@@ -6,20 +6,45 @@ set -e
 systemctl stop ringzero-daemon 2>/dev/null || true
 systemctl disable ringzero-daemon 2>/dev/null || true
 
-# Detach any lingering eBPF programs (cgroup programs persist beyond process exit)
+# Detach any lingering eBPF programs. Keep in step with uninstall.sh.
+rz_detach_ebpf() {
+  # Programs are named ringzero_* (the kernel truncates to 15 chars).
+  local ids
+  ids=$(bpftool prog list 2>/dev/null | awk '/ name ringzero_/ {sub(":", "", $1); print $1}' || true)
+  [ -z "$ids" ] && return 0
+  # bpf_link attachments: every LSM hook, and cgroup hooks on kernels >= 5.7.
+  # "ID: TYPE  prog PROG_ID ..." -> "LINK_ID PROG_ID"
+  bpftool link list 2>/dev/null \
+    | awk '/^[0-9]+:/ {for (i = 2; i < NF; i++) if ($i == "prog") {sub(":", "", $1); print $1, $(i + 1)}}' \
+    | while read -r link_id prog; do
+        for id in $ids; do
+          if [ "$prog" = "$id" ]; then bpftool link detach id "$link_id" 2>/dev/null || true; fi
+        done
+      done || true
+  # Legacy cgroup attachments (pre-5.7 fallback) are not links and survive
+  # process exit. "ID  ATTACH_TYPE  [FLAGS]  NAME" -> detach by type and id.
+  for cg in /sys/fs/cgroup /sys/fs/cgroup/unified; do
+    [ -d "$cg" ] || continue
+    bpftool cgroup show "$cg" 2>/dev/null \
+      | awk '$1 ~ /^[0-9]+$/ && $NF ~ /^ringzero_/ {print $1, $2}' \
+      | while read -r id type; do
+          bpftool cgroup detach "$cg" "$type" id "$id" 2>/dev/null || true
+        done || true
+  done
+}
+
+rz_ebpf_remaining() {
+  bpftool prog list 2>/dev/null | grep -c ' name ringzero_' || true
+}
+
 if command -v bpftool &>/dev/null; then
-  # Detach LSM programs
-  for id in $(bpftool prog list 2>/dev/null | grep -E 'ringzero_' | awk '{print $1}' | tr -d ':'); do
-    bpftool prog detach id "$id" type lsm 2>/dev/null || true
-  done
-  # Detach cgroup programs (these survive process exit)
-  for cgroup_path in /sys/fs/cgroup /sys/fs/cgroup/unified; do
-    if [ -d "$cgroup_path" ]; then
-      bpftool cgroup detach "$cgroup_path" connect4 2>/dev/null || true
-      bpftool cgroup detach "$cgroup_path" connect6 2>/dev/null || true
-      bpftool cgroup detach "$cgroup_path" sock_ops 2>/dev/null || true
-    fi
-  done
+  rz_detach_ebpf
+  left=$(rz_ebpf_remaining)
+  if [ "$left" -ne 0 ]; then
+    echo "ringzero: $left eBPF program(s) still loaded after detach; reboot to clear them." >&2
+  fi
+else
+  echo "ringzero: bpftool not found, could not detach eBPF programs; reboot to clear them." >&2
 fi
 
 # Remove pinned BPF objects

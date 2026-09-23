@@ -46,30 +46,70 @@ fi
 
 systemctl daemon-reload
 
-# Detach eBPF programs before removing anything else.
+# Make sure no kernel programs are left behind, and say so truthfully.
 #
-# WHY THIS EXISTS. Stopping the daemon does not remove its kernel programs.
-# cgroup programs in particular persist beyond process exit, so without this a
-# source install could be "uninstalled" and leave enforcement attached to the
-# kernel with nothing left running to manage, inspect or disable it. The .deb
-# path has always done this in packaging/deb/DEBIAN/prerm; this script did not,
-# which meant the two removal paths disagreed on whether the machine was
-# actually left clean. Keep them in step.
+# WHAT WAS MEASURED, on Linux 6.8 with the daemon running 14 LSM programs and 2
+# cgroup_sock_addr programs:
+#
+#   - Stopping the service takes all 16 to zero. Every time. The kernel holds
+#     these against the owning process's descriptor, so they go when it goes.
+#   - An LSM link CANNOT be detached from outside. `bpftool link detach id N`
+#     on one returns "Operation not supported". That is by design, not a
+#     syntax problem, so no better command exists.
+#   - There were no legacy cgroup attachments to find at all.
+#
+# So the honest job here is not detaching, it is VERIFYING. An earlier version
+# of this ran two commands that were invalid, discarded their errors, and then
+# printed "Detached eBPF programs" regardless — the exact failure this product
+# exists to catch in other software.
+#
+# The legacy sweep below is kept because on kernels before 5.7 cgroup programs
+# are attached without links and do survive process exit. That path could not
+# be exercised here, and is written to be harmless when there is nothing to do.
+rz_detach_ebpf() {
+  # Programs are named ringzero_* (the kernel truncates to 15 chars).
+  local ids
+  ids=$(bpftool prog list 2>/dev/null | awk '/ name ringzero_/ {sub(":", "", $1); print $1}' || true)
+  [ -z "$ids" ] && return 0
+  # bpf_link attachments: every LSM hook, and cgroup hooks on kernels >= 5.7.
+  # "ID: TYPE  prog PROG_ID ..." -> "LINK_ID PROG_ID"
+  bpftool link list 2>/dev/null \
+    | awk '/^[0-9]+:/ {for (i = 2; i < NF; i++) if ($i == "prog") {sub(":", "", $1); print $1, $(i + 1)}}' \
+    | while read -r link_id prog; do
+        for id in $ids; do
+          if [ "$prog" = "$id" ]; then bpftool link detach id "$link_id" 2>/dev/null || true; fi
+        done
+      done || true
+  # Legacy cgroup attachments (pre-5.7 fallback) are not links and survive
+  # process exit. "ID  ATTACH_TYPE  [FLAGS]  NAME" -> detach by type and id.
+  for cg in /sys/fs/cgroup /sys/fs/cgroup/unified; do
+    [ -d "$cg" ] || continue
+    bpftool cgroup show "$cg" 2>/dev/null \
+      | awk '$1 ~ /^[0-9]+$/ && $NF ~ /^ringzero_/ {print $1, $2}' \
+      | while read -r id type; do
+          bpftool cgroup detach "$cg" "$type" id "$id" 2>/dev/null || true
+        done || true
+  done
+}
+
+rz_ebpf_remaining() {
+  bpftool prog list 2>/dev/null | grep -c ' name ringzero_' || true
+}
+
 if command -v bpftool &>/dev/null; then
-  for id in $(bpftool prog list 2>/dev/null | grep -E 'ringzero_' | awk '{print $1}' | tr -d ':'); do
-    bpftool prog detach id "$id" type lsm 2>/dev/null || true
-  done
-  for cgroup_path in /sys/fs/cgroup /sys/fs/cgroup/unified; do
-    if [[ -d "$cgroup_path" ]]; then
-      bpftool cgroup detach "$cgroup_path" connect4 2>/dev/null || true
-      bpftool cgroup detach "$cgroup_path" connect6 2>/dev/null || true
-      bpftool cgroup detach "$cgroup_path" sock_ops 2>/dev/null || true
-    fi
-  done
-  info "Detached eBPF programs"
+  rz_detach_ebpf
+  left=$(rz_ebpf_remaining)
+  if [[ "$left" -eq 0 ]]; then
+    info "No eBPF programs remain loaded"
+  else
+    warn "$left ringzero eBPF program(s) are STILL LOADED. Stopping the service"
+    warn "normally clears them, so this means something is still holding them."
+    warn "Check 'bpftool prog list'; a reboot will clear them for certain."
+  fi
 else
-  warn "bpftool not found — could not detach eBPF programs. If enforcement"
-  warn "appears to still be active, reboot to clear them."
+  warn "bpftool not found — could not verify that eBPF programs were unloaded."
+  warn "Stopping the service normally clears them. If enforcement appears to"
+  warn "still be active, reboot to be certain."
 fi
 
 # Remove pinned BPF objects

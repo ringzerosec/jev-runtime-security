@@ -450,7 +450,8 @@ static __always_inline int rate_limit_ok(void) {
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 2);  // [0] = events dropped, [1] = send_events dropped
+    __uint(max_entries, 3);  // [0] = events dropped, [1] = send_events dropped,
+                             // [2] = tainted_pids inserts refused (map full)
     __type(key, u32);
     __type(value, u64);
 } drop_counters SEC(".maps");
@@ -559,11 +560,11 @@ static __always_inline int is_ai_agent(const char *comm) {
 // Raise taint on a pid. Raise-only: an existing entry is never downgraded, and
 // has_keys is never cleared, because taint may narrow authority and never widen
 // it. The kernel drops the entry on process exit, which is not a downgrade.
-// Drop counter slot 1: taint insertions the map refused. `tainted_pids` is a
+// Drop counter slot 2: taint insertions the map refused. `tainted_pids` is a
 // plain HASH capped at 10000 with no eviction, so once it fills, new taint is
 // silently lost — which would look exactly like a process that never ingested
 // anything. Counted so the failure is visible instead of invisible.
-#define DROP_TAINT_INSERT 1
+#define DROP_TAINT_INSERT 2
 
 static __always_inline void raise_taint(u32 pid, u32 now_s) {
     struct taint_info *ex = bpf_map_lookup_elem(&tainted_pids, &pid);

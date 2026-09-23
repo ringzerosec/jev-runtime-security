@@ -1830,6 +1830,18 @@ pub async fn start(
                             }
                         }
                     }
+                    // Slot 2 is not a ring buffer: it counts taint the kernel
+                    // could not record because tainted_pids is full.
+                    if let Ok(values) = drop_map.get(&2u32, 0) {
+                        let total: u64 = values.iter().sum();
+                        if total > 0 {
+                            tracing::warn!(
+                                refused = total,
+                                "tainted_pids map is full — new taint is being lost, so \
+                                 processes that ingested untrusted input may not be marked"
+                            );
+                        }
+                    }
                 }
             }
 

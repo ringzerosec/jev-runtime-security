@@ -320,45 +320,13 @@ async fn handle_client(
             }
         }
         ClientRequest::SetNetworkMode { mode } => {
-            // Same gate as SetEnforceMode below. This had neither check, and
-            // the IPC socket accepts the operator uid by design, so an agent
-            // running as the developer could flip network mode with one line
-            // of JSON — a policy change from inside the thing being policed.
-            if peer_uid != 0 {
-                tracing::warn!(
-                    peer_uid,
-                    requested_mode = ?mode,
-                    "Refused IPC network-mode change from non-root peer"
-                );
-                send_msg(
-                    &mut write_half,
-                    &DaemonMessage::Error {
-                        message: "changing network mode requires root (try: sudo rz ...)".into(),
-                    },
-                )
-                .await?;
-                return Ok(());
-            }
-            let caller = match peer_pid {
-                Some(pid) => crate::api::caller::classify_pid(pid),
-                None => crate::api::caller::Caller::Unresolved {
-                    reason: "SO_PEERCRED carried no pid".to_string(),
-                },
-            };
-            if !caller.may_mutate() {
-                tracing::warn!(
-                    peer_uid,
-                    ?peer_pid,
-                    requested_mode = ?mode,
-                    "Refused IPC network-mode change: caller could not be shown to be a human"
-                );
-                send_msg(
-                    &mut write_half,
-                    &DaemonMessage::Error {
-                        message: caller.refusal_message(),
-                    },
-                )
-                .await?;
+            // Same gate as SetEnforceMode. The IPC socket accepts the operator
+            // uid by design, so without it an agent running as the developer
+            // could flip network mode with one line of JSON.
+            if let Err(message) =
+                require_root_human_caller(peer_uid, peer_pid, "network mode", &mode)
+            {
+                send_msg(&mut write_half, &DaemonMessage::Error { message }).await?;
                 return Ok(());
             }
             *network.mode.write().await = mode.clone();
@@ -371,48 +339,10 @@ async fn handle_client(
         }
         ClientRequest::SetEnforceMode { mode } => {
             // Turning enforcement off is an operator action, not an agent one.
-            // The agent runs as the operator UID, so the operator UID is not
-            // enough: require root on the peer credential the kernel gave us.
-            if peer_uid != 0 {
-                tracing::warn!(
-                    peer_uid,
-                    requested_mode = ?mode,
-                    "Refused IPC enforce-mode change from non-root peer"
-                );
-                send_msg(
-                    &mut write_half,
-                    &DaemonMessage::Error {
-                        message: "changing enforcement requires root (try: sudo rz ...)".into(),
-                    },
-                )
-                .await?;
-                return Ok(());
-            }
-
-            // Root is no longer enough on its own. sudo caches credentials per
-            // tty, so an agent in a terminal where the operator recently
-            // authenticated can reach this as root with no prompt. Ask who the
-            // caller is, and refuse when it cannot be shown to be a human.
-            let caller = match peer_pid {
-                Some(pid) => crate::api::caller::classify_pid(pid),
-                None => crate::api::caller::Caller::Unresolved {
-                    reason: "SO_PEERCRED carried no pid".to_string(),
-                },
-            };
-            if !caller.may_mutate() {
-                tracing::warn!(
-                    peer_uid,
-                    ?peer_pid,
-                    requested_mode = ?mode,
-                    "Refused IPC enforce-mode change: the caller could not be shown to be a human operator"
-                );
-                send_msg(
-                    &mut write_half,
-                    &DaemonMessage::Error {
-                        message: caller.refusal_message(),
-                    },
-                )
-                .await?;
+            if let Err(message) =
+                require_root_human_caller(peer_uid, peer_pid, "enforcement", &mode)
+            {
+                send_msg(&mut write_half, &DaemonMessage::Error { message }).await?;
                 return Ok(());
             }
             *network.enforce.write().await = mode.clone();
@@ -431,6 +361,42 @@ async fn handle_client(
         }
     }
 
+    Ok(())
+}
+
+/// The gate for every IPC request that changes policy. Returns the refusal
+/// message to send back when the caller is not allowed.
+///
+/// Root on the kernel-supplied peer credential is required because the agent
+/// runs as the operator uid, so the operator uid proves nothing. Root is not
+/// enough on its own either: sudo caches credentials per tty, so an agent in a
+/// terminal where the operator recently authenticated can reach this as root
+/// with no prompt. The caller must also be shown to be a human.
+fn require_root_human_caller(
+    peer_uid: u32,
+    peer_pid: Option<u32>,
+    what: &str,
+    requested: &dyn std::fmt::Debug,
+) -> Result<(), String> {
+    if peer_uid != 0 {
+        tracing::warn!(peer_uid, requested = ?requested, "Refused IPC {what} change from non-root peer");
+        return Err(format!("changing {what} requires root (try: sudo rz ...)"));
+    }
+    let caller = match peer_pid {
+        Some(pid) => crate::api::caller::classify_pid(pid),
+        None => crate::api::caller::Caller::Unresolved {
+            reason: "SO_PEERCRED carried no pid".to_string(),
+        },
+    };
+    if !caller.may_mutate() {
+        tracing::warn!(
+            peer_uid,
+            ?peer_pid,
+            requested = ?requested,
+            "Refused IPC {what} change: the caller could not be shown to be a human operator"
+        );
+        return Err(caller.refusal_message());
+    }
     Ok(())
 }
 

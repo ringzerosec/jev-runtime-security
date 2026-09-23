@@ -257,7 +257,19 @@ pub fn in_scope_fd(
 pub fn is_agent_journal(path: &str) -> bool {
     let p = path.to_lowercase();
     p.ends_with("/.claude.json")
-        || p.ends_with(".claude.json.backup")
+        // Claude Code names its config backups `.claude.json.backup.<millis>`.
+        // An `ends_with(".claude.json.backup")` check never matched the real
+        // filename, so every session's backup was flagged High as a hostile
+        // agent write, and with quarantine on the agent would be refused its
+        // own state. Found by reading the review queue, not the code.
+        || p.contains(".claude.json.backup")
+        || p.contains("/.claude/backups/")
+        // The agent's own credential store. Its contents are credential-shaped
+        // by definition, so it trips every secret pattern we have, and a
+        // quarantine on it locks the agent out of its own login. Our job is
+        // to stop the agent reaching YOUR credentials, not its own.
+        || p.contains("/.claude/.credentials")
+        || p.contains("/.codex/auth.json")
         || p.contains("/.claude/projects/")
         || p.contains("/.claude/todos/")
         || p.contains("/.claude/statsig/")

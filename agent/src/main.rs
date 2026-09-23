@@ -2258,44 +2258,6 @@ async fn async_main() -> Result<()> {
         )))
     };
 
-    // TTL expiry, and the loud failure when nothing is ever learned.
-    if let Some(mgr) = dns_allow.clone() {
-        let taint_on = cfg.egress.taint_on_egress;
-        let names = cfg.egress.allow_names.len();
-        tokio::spawn(async move {
-            let started = std::time::Instant::now();
-            let mut warned = false;
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                mgr.lock().await.expire_now().await;
-
-                // A FEATURE THAT QUIETLY DOES NOTHING IS THE FAILURE MODE TO
-                // AVOID. If no answer for any allowlisted name has been seen a
-                // few minutes in, hostname allowlisting is not working on this
-                // host, and we can name the likely cause in advance.
-                if !warned
-                    && taint_on
-                    && started.elapsed() >= std::time::Duration::from_secs(300)
-                    && mgr.lock().await.learned_count() == 0
-                {
-                    warned = true;
-                    tracing::warn!(
-                        allow_names = names,
-                        "HOSTNAME ALLOWLISTING IS NOT WORKING ON THIS HOST. Five minutes in, no \
-                         DNS answer has been observed for any name in [egress] allow_names, so \
-                         the egress allowlist is empty. The usual cause is encrypted DNS: with \
-                         DNS over HTTPS or TLS there is no plaintext answer to read, and \
-                         systemd-resolved can be configured that way. A connected UDP socket \
-                         that reports no source address has the same effect. With \
-                         taint_on_egress on, every session will be tainted, and with enforce on \
-                         everything off-allowlist will be refused. Fix it by listing literal \
-                         addresses in [egress] allow, or turn taint_on_egress off."
-                    );
-                }
-            }
-        });
-    }
-
     let stdio_exec_tx = if cfg.stdio_capture.enabled {
         let redaction = cfg.webhooks.redaction.clone();
         match integrations::webhook::Redactor::new(&redaction) {
@@ -2342,6 +2304,60 @@ async fn async_main() -> Result<()> {
         None
     };
     let _ = &stdio_exec_tx;
+
+    // The DNS answer capture only exists while terminal capture is running:
+    // it is attached from the stdio object. With capture off (by config, or
+    // because redaction was unusable), allow_names can never learn anything,
+    // so say so now and name the real cause rather than wait five minutes and
+    // blame encrypted DNS.
+    let dns_feed = stdio_exec_tx.is_some();
+    if dns_allow.is_some() && !dns_feed {
+        tracing::warn!(
+            allow_names = cfg.egress.allow_names.len(),
+            "HOSTNAME ALLOWLISTING IS OFF: [egress] allow_names is set, but the DNS answer \
+             capture it learns from is attached with terminal capture, which is not running \
+             ([stdio_capture] enabled = false, or redaction is unusable). No name will ever be \
+             allowed. Turn [stdio_capture] enabled on, or list literal addresses in [egress] allow."
+        );
+    }
+
+    // TTL expiry, and the loud failure when nothing is ever learned.
+    if let Some(mgr) = dns_allow.clone().filter(|_| dns_feed) {
+        let taint_on = cfg.egress.taint_on_egress;
+        let names = cfg.egress.allow_names.len();
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let mut warned = false;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                mgr.lock().await.expire_now().await;
+
+                // A FEATURE THAT QUIETLY DOES NOTHING IS THE FAILURE MODE TO
+                // AVOID. If no answer for any allowlisted name has been seen a
+                // few minutes in, hostname allowlisting is not working on this
+                // host, and we can name the likely cause in advance.
+                if !warned
+                    && taint_on
+                    && started.elapsed() >= std::time::Duration::from_secs(300)
+                    && mgr.lock().await.learned_count() == 0
+                {
+                    warned = true;
+                    tracing::warn!(
+                        allow_names = names,
+                        "HOSTNAME ALLOWLISTING IS NOT WORKING ON THIS HOST. Five minutes in, no \
+                         DNS answer has been observed for any name in [egress] allow_names, so \
+                         the egress allowlist is empty. The usual cause is encrypted DNS: with \
+                         DNS over HTTPS or TLS there is no plaintext answer to read, and \
+                         systemd-resolved can be configured that way. A connected UDP socket \
+                         that reports no source address has the same effect. With \
+                         taint_on_egress on, every session will be tainted, and with enforce on \
+                         everything off-allowlist will be refused. Fix it by listing literal \
+                         addresses in [egress] allow, or turn taint_on_egress off."
+                    );
+                }
+            }
+        });
+    }
 
     // ── Scan what an agent writes, when the write finishes ────────────────
     //
