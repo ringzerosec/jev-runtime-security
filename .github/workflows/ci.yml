@@ -28,8 +28,19 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev bpftool \
-            pkg-config libssl-dev
+          sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev \
+            pkg-config libssl-dev linux-tools-common
+          # 'bpftool' is a virtual package on Ubuntu 24.04 — the real binary
+          # ships in the kernel's linux-tools. Install the running kernel's set,
+          # falling back to the generic build. If the /usr/sbin/bpftool wrapper
+          # can't resolve the running kernel flavour, point the Makefile at the
+          # binary directly (btf dump doesn't need a version match).
+          sudo apt-get install -y "linux-tools-$(uname -r)" \
+            || sudo apt-get install -y linux-tools-generic
+          if ! bpftool version >/dev/null 2>&1; then
+            found="$(find /usr/lib/linux-tools* -name bpftool -type f 2>/dev/null | head -1)"
+            [ -n "$found" ] && echo "BPFTOOL=$found" >> "$GITHUB_ENV"
+          fi
 
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
