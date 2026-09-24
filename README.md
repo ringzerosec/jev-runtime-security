@@ -30,9 +30,9 @@ OpenAI's *Agent security in the enterprise* states the problem plainly:
 Ring Zero is the enforced control, placed at the lowest layer the agent runs on.
 
 ## Demo
-[![Watch the video]([https://youtube.com](https://youtu.be/bR8qixgksOI))]
-
-
+  
+  [![Ring Zero Security — watch the 
+  demo](https://img.youtube.com/vi/bR8qixgksOI/maxresdefault.jpg)](https://youtu.be/bR8qixgksOI)
 
 ## How the guidance maps to what Ring Zero does
 
