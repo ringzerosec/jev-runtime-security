@@ -1,3 +1,5 @@
+
+
 # Ring Zero Security
 
 [![build](https://github.com/ringzerosec/jev-runtime-security/actions/workflows/ci.yml/badge.svg)](https://github.com/ringzerosec/jev-runtime-security/actions/workflows/ci.yml)
@@ -26,6 +28,9 @@ OpenAI's *Agent security in the enterprise* states the problem plainly:
   checks are not the same thing.
 
 Ring Zero is the enforced control, placed at the lowest layer the agent runs on.
+
+## Demo
+https://youtu.be/bR8qixgksOI
 
 ## How the guidance maps to what Ring Zero does
 
