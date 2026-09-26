@@ -43,10 +43,14 @@ jobs:
       # for anyone building locally or a release.
 
       - name: Build userspace (Apache-2.0 side)
-        run: cargo build --release
+        # The desktop viewer (ringzero-app) pulls in GTK/glib and is built in its
+        # own `desktop viewer` job, which installs that stack. Exclude it here so
+        # the daemon build stays free of GUI system deps — "a GUI build failure
+        # must never block the daemon."
+        run: cargo build --release --workspace --exclude ringzero-app
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude ringzero-app
 
       - name: Format
         run: cargo fmt --all -- --check
