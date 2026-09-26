@@ -33,6 +33,7 @@
 // checks/README.md.
 
 pub mod jev;
+pub mod registry;
 pub mod thresholds;
 
 use once_cell::sync::Lazy;
