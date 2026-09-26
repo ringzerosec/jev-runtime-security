@@ -42,12 +42,17 @@ jobs:
       # CI verifies the userspace side; the BPF C still compiles via the Makefile
       # for anyone building locally or a release.
 
-      - name: Build userspace (Apache-2.0 side)
-        # The desktop viewer (ringzero-app) pulls in GTK/glib and is built in its
-        # own `desktop viewer` job, which installs that stack. Exclude it here so
-        # the daemon build stays free of GUI system deps — "a GUI build failure
-        # must never block the daemon."
-        run: cargo build --release --workspace --exclude ringzero-app
+      # Debug, not --release: CI verifies it compiles and the tests pass; the
+      # release binaries are built at packaging time (build-deb.sh), so an
+      # optimized compile here is only wasted minutes. `cargo test` reuses the
+      # build's debug artifacts, so the two steps compile the workspace once.
+      #
+      # ringzero-app (the Tauri desktop viewer) pulls in GTK/glib and is built in
+      # its own `desktop viewer` job, which installs that stack. Excluding it here
+      # keeps the daemon build free of GUI system deps — "a GUI build failure must
+      # never block the daemon."
+      - name: Build the userspace (Apache-2.0 side)
+        run: cargo build --workspace --exclude ringzero-app
 
       - name: Test
         run: cargo test --workspace --exclude ringzero-app
