@@ -122,5 +122,6 @@ the benchmark gate is its brake.
 - **Redact fail-closed.** No unredacted payload/secret enters the corpus.
 - **Attacker models are contained data sources,** never trusted, never in the
   defense path.
-- **The kernel still decides.** The loop sharpens the advisory brain; enforcement
-  stays deterministic. The one rule does not move.
+- **The kernel executes; the brain decides.** The loop sharpens the RLCD brain
+  that makes the call off the hot path; the kernel enforces it deterministically.
+  Tighten-only does not move (see `THE-BRAIN.md`).

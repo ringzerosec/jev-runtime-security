@@ -1,8 +1,10 @@
 # Benchmarks — how Ring Zero performs on blocking different attacks
 
 Two axes, measured and reported **separately**. Conflating them ("the model
-blocks 94% of attacks") is dishonest, because the model never blocks — the kernel
-does, deterministically, and the model is advisory/raise-only. So:
+blocks 94% of attacks") is dishonest: the kernel executes every block,
+deterministically, and the model's job is the *decision* that produces it — a
+tighten-only verdict made off the hot path (see `../THE-BRAIN.md`). A detection
+number is not an enforcement number. So:
 
 ## Axis 1 — Enforcement outcome (the product)
 
@@ -20,7 +22,7 @@ evasion variants, and a miss is reported, not hidden.
 
 ## Axis 2 — Detection quality (the model)
 
-For the advisory model layer, on a labelled test set, per category:
+For the model layer (the brain), on a labelled test set, per category:
 
 - **precision / recall / F1** against the ground-truth label.
 - **ECE** (expected calibration error) — not just accuracy.

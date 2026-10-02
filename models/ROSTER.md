@@ -1,16 +1,42 @@
-# Model roster (base models)
+# Model roster — the brain, by tier
 
-All models are advisory and **raise-only** (the kernel decides; see the one rule).
-All are **local, fine-tuneable, open-weight** — no hosted API in the product. They
-plug into the pluggable registry (`checks/src/registry.rs`) under one contract, so
+> Read `THE-BRAIN.md` first. The RLCD intent models **are the product**; this
+> file is the inventory. Every model is **local, fine-tuneable, open-weight** —
+> no hosted API in the product. Models **decide** (off the hot path); the kernel
+> **executes** (precompute-then-bit). Every model is **tighten-only** versus the
+> deterministic floor — and tighten-only is not advisory-only.
+
+They plug into the registry (`checks/src/registry.rs`) under one contract, so
 swapping or adding a model is a config route, not a code change.
 
-| Tier | Job | Base model (LOCKED / candidate) | Why |
-|---|---|---|---|
-| **Reflex** (per-event) | option-scoring for each `EnforcementCategory` | **Laya** — `convaiinnovations/laya`, **Apache-2.0**, ModernBERT-large encoder (~421M; mmBERT-base ~322M multilingual) | encoder = one forward pass → fast + **calibrated probabilities** natively; open + shippable + local |
-| **DLP** | secret/PII extraction | **GLiNER-family** (open, Apache/MIT, e.g. `urchade/gliner*`) — also an encoder | schema-driven entity extraction; catches what regex misses; raise-only floor over the redactor |
-| **Judgment** (per-trace) | trajectory / behaviour, custom definitions | generative / Span-1-style — **TBD (build/adopt)** | needs reasoning over long traces & operator-defined behaviours; the hard, later bet |
-| **Malware** (bounded) | agent-written/downloaded file → malicious? | small encoder decision model, YARA-labelled — see `models/malware/` | releasable now on open data; floor over `yara-x` |
+| Tier | Job | Base model | On-device? | ~Size (int8) |
+|---|---|---|---|---|
+| **Reflex** (per-event / per-artifact) — **all 13 categories** | typed decision per `EnforcementCategory`, including the core one: *does this written artifact express intent to circumvent policy?* | **Laya** — `convaiinnovations/laya`, **Apache-2.0**, ModernBERT-large encoder ~421M (mmBERT-base ~322M multilingual) — **LOCKED** | ✅ | **~0.4 GB** |
+| **DLP** | secret / PII spans | GLiNER-small family (open, Apache/MIT) — also an encoder | ✅ | ~0.2–0.4 GB *(est.)* |
+| **Malware** (bounded) | agent-written / downloaded file → malicious? | small YARA-labelled encoder (`models/malware/`); may fold into Laya if a pilot shows it carries the decision | ✅ | ~0.1–0.2 GB *(est.)* |
+| **Judgment** (per-session) | multi-step reasoning over a whole trace; operator-defined behaviours; a verdict **with an explanation** for the audit trail | ~4B **generative** fine-tune (Kev / Qwen class) — **adopt + fine-tune, never pretrain** | ❌ **customer-self-hosted** (on-prem box); **absent** in the sealed-sandbox SKU | ~8 GB (off the box) |
+
+**On-device total ≈ 0.7–1.0 GB, int8.** The heavy reasoning model never lives
+on the endpoint. *(Sizes are derived from parameter counts; measured artifact
+sizes go in `bench/` when the ONNX export is benchmarked.)*
+
+## 13 categories, one reflex model
+
+Laya is a typed-decision engine, not a per-task classifier: it reads the
+situation once and scores whatever option set it is handed. A category is a
+**question template + a small ordinal option set** (`schema.py`), not a model.
+A new category costs a template and labelled rows, not a training run. This is
+why the roster is four tiers and not thirteen models, and why the on-device
+footprint is ~1 GB and not ~10.
+
+## Sizing follows the task, not a rule of thumb
+
+- *Per-artifact / per-event* (fits 512–1024 tokens): the encoder, on-device.
+  Scaling Laya to 1B+ would break the one property that makes it shippable
+  (runs on every laptop, no GPU) for marginal gain. Don't.
+- *Per-session* (whole trace, needs long context + an explanation): generative,
+  self-hosted. Not a bigger encoder — encoders don't reason over a session or
+  explain themselves.
 
 ## Why Laya over Tev1 (the reflex base)
 
@@ -20,26 +46,43 @@ Same 5 cases, our own contract, zero-shot (no fine-tuning):
 |---|---|---|
 | accuracy on our cases | 3/5 (under-graded exfil + injection) | **5/5** |
 | calibrated probability | no | **yes** (0.52–0.88, sensible) |
-| CPU latency | 1–5.5 s | 0.3–2.1 s |
+| CPU latency (unoptimized PyTorch) | 1–5.5 s | 0.3–2.1 s |
 | licence | unfinalized | **Apache-2.0** |
 
-Laya's `score` question type is an ordinal severity (0..N) — a clean fit for our
-benign→severe option sets and raise-only. Honest caveat: 5 hand-written cases is a
-**smoke test, not a benchmark** (`models/bench` is the real measure), and the
-33 ms figure is GPU/ONNX — CPU unoptimized is ~hundreds of ms.
+Laya's `score` type is an ordinal severity (0..N) — a clean fit for our
+benign→severe option sets and tighten-only. **Honest caveats:** 5 hand-written
+cases is a **smoke test, not a benchmark** (`bench/` is the real measure, and
+its bootstrap set is synthetic and labelled so). Laya's 33 ms figure is
+**GPU/ONNX**; on CPU, unoptimized, it is hundreds of ms to ~2 s — the shipping
+path is the ONNX-int8 export and *that* number is the one to measure. Laya's
+base checkpoint is weak on domain decisions (their own typed-decisions set:
+0.362 base → 0.766 fine-tuned); the categories are earned through the training
+loop, not zero-shot.
 
 ## Serving
 
-`laya.predict(state, questions)` in-process, exported to **ONNX** for the sealed
-sandbox (no server, no network). The registry's `DecisionEndpoint` wraps it; the
-raise-only clamp is enforced centrally in the registry, not per-model.
+`laya.predict(state, questions)` in-process, exported to **ONNX** for the
+sealed sandbox (no server, no network). The registry's `DecisionEndpoint` wraps
+it; the tighten-only clamp is enforced centrally in the registry, not
+per-model. The judgment tier is reached through the same contract
+(`HttpEndpoint`, System-One compatible) when a customer runs one.
+
+## Status (honest)
+
+No weights ship in this release; the shipped checks are deterministic
+(`README.md`). The `enforce` bit is pattern-set only today; the
+calibrated-confidence model→enforce path is the next target (`THE-BRAIN.md` §5,
+§7). Nothing here is a claim that a model blocks anything *yet*.
 
 ## Next
 
-1. **Fine-tune Laya v1** on `build_dataset.py` output + the seed misses
-   (`models/misses/`), re-run the 5 cases + the benchmark. (Laya is Apache-2.0, so
-   the fine-tuned weights are ours to ship.)
-2. Wire Laya through the registry (`DecisionEndpoint` → `laya.predict`) — the
-   sealed local path end to end.
-3. The training loop then feeds confirmed misses back (`models/TRAINING-LOOP.md`),
+1. **Fine-tune Laya v1** on `build_dataset.py` output + `misses/` (including the
+   five `multi_step_evasion` seed rows). Re-run the 5 cases + the benchmark.
+2. **Wire Laya through the registry** (`DecisionEndpoint` → `laya.predict`,
+   ONNX, sealed path) — end to end, on-device.
+3. **Benchmark the shipping path:** ONNX-int8 latency (single + batch of 10) and
+   artifact size, CPU and MPS — replace every estimate above with a number.
+4. **Implement the calibrated-confidence tiers** (enforce / contain / review),
+   gated as in `THE-BRAIN.md` §5 — the `GPL/` side as an issue + diff.
+5. The training loop then feeds confirmed misses back (`TRAINING-LOOP.md`),
    manual-triggered, benchmark-gated.

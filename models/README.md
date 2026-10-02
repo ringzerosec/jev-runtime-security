@@ -38,8 +38,10 @@ Policy drafting, artifact labelling, denial triage, and intent–action
 correlation. Each of these reads traces that only exist once the enforcement
 layer has been running somewhere real. None of them is implemented.
 
-Whatever arrives, the rule does not move: a model may make a proposed policy
-stricter, never looser, and the kernel never calls one.
+Whatever arrives, the rule does not move: a model may make things stricter,
+never looser, and the kernel never *calls* one — it executes the model's
+precomputed verdict. The design — the RLCD models are the brain, the kernel the
+executor — lives in `THE-BRAIN.md`; this file is the honest status.
 
 ## The scanner model layer, and what is not measured
 

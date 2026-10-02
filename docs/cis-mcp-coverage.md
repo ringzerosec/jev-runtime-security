@@ -10,8 +10,8 @@ How Ring Zero maps to the CIS MCP Server Benchmark. Three uses in one sheet: a
 **Legend**
 - 🟢 **Enforce (kernel)** — Ring Zero enforces this at the syscall. *Most MCP
   tooling cannot; this is the differentiator.*
-- 🔵 **Detect / audit** — our models flag it and/or the trace records it (advisory,
-  raise-only).
+- 🔵 **Detect / audit** — our models (the RLCD brain) decide and/or the trace
+  records it (tighten-only; see `models/THE-BRAIN.md`).
 - 🟡 **Roadmap** — planned (mostly the MCP gateway / identity work).
 - ⚪ **Server-author's job** — protocol/crypto/impl concern of whoever *builds* the
   MCP server, outside our runtime-enforcement lane. We don't implement MCP; we
@@ -37,7 +37,7 @@ confinement, filesystem-scope, path-traversal, and least-privilege controls
 (§9.2, §4.2.1, §5.4.1, §4.2.2, §9.3) — at the syscall, where app-layer MCP tools
 can't."*
 
-## Detect / audit (🔵 — our advisory brain + trace)
+## Detect / audit (🔵 — the brain + trace)
 
 | CIS | Requirement | Ring Zero |
 |---|---|---|

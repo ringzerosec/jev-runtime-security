@@ -2,10 +2,13 @@
 //! Pluggable model-provider registry — one contract for every model.
 //!
 //! THE ONE RULE holds here without exception: nothing in this module runs in a
-//! syscall hook, the kernel never waits on it, and every provider is advisory
-//! and **raise-only** — a model answer may move a verdict to a MORE severe
-//! option, never a less severe one. The deterministic result is always the
-//! floor; a model can only build up from it.
+//! syscall hook and the kernel never waits on it. The models are the brain —
+//! they DECIDE, off the hot path; the kernel EXECUTES that decision as a
+//! precomputed bit. Every provider is **tighten-only** ("raise-only"): a model
+//! answer may move a verdict to a MORE severe option, never a less severe one.
+//! The deterministic result is the floor; a model builds up from it — all the
+//! way to enforce, above a calibrated confidence (see models/THE-BRAIN.md).
+//! Tighten-only is NOT advisory-only.
 //!
 //! Every model — the malware decision model, the DLP extractor, the agent-intent
 //! specialists, a future trace-behaviour brain — speaks ONE contract: given a
@@ -48,7 +51,7 @@ impl OptionSet {
     }
 }
 
-/// One advisory verdict for one category.
+/// One verdict — the model's decision for one category (tighten-only vs the floor).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Verdict {
     pub category: String,
@@ -175,8 +178,8 @@ impl<T: Transport> DecisionEndpoint for HttpEndpoint<T> {
     }
 }
 
-/// Routes categories to endpoints and applies the raise-only clamp centrally, so
-/// no single provider can violate it.
+/// Routes categories to endpoints and applies the tighten-only ("raise-only")
+/// clamp centrally, so no single provider can loosen a verdict below the floor.
 pub struct Registry {
     option_sets: HashMap<String, OptionSet>,
     questions: HashMap<String, String>,

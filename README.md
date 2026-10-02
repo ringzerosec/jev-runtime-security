@@ -40,14 +40,14 @@ Ring Zero is the enforced control, placed at the lowest layer the agent runs on.
 |---|---|
 | Enforce boundaries, below the agent | eBPF/LSM decides file open / create / delete / rename per agent, at the syscall. It runs below the agent and can't be talked around. |
 | Place the control close to the effect | The decision is on the operation itself — a protected file is matched by basename **and** `(device, inode)`, so a rename, hardlink or symlink hits the same decision. |
-| Enforced control ≠ advisory check | The kernel decides deterministically. The model (checks / Jev) only *raises* severity — it can make a verdict stricter, never permit what policy denies. |
+| Enforced control ≠ advisory check | The kernel executes deterministically — no model runs in the syscall path. The RLCD intent models are the brain: they decide, off the hot path, and the kernel enforces that verdict. A model can only make a verdict *stricter*, never permit what policy denies (see [models/THE-BRAIN.md](models/THE-BRAIN.md)). |
 | Assume context is untrusted | A web fetch, search, or MCP call raises kernel **taint** on the agent's process tree; a tainted process can be held to an egress allowlist (opt-in). |
 | The agent is an identifiable actor | Enforcement authority is root-only. The agent runs as your developer with a **read-only** token and can't turn enforcement off. |
 | Observe actions | One trace keyed on `session_id` joins what it *looked like* the agent would do with what it *actually* did. |
 
 ## The one rule
 
-**Enforcement is deterministic. Models never decide the syscall.**
+**Enforcement is deterministic — no model runs in the syscall path. The models decide, off the hot path; the kernel executes.**
 
 The kernel allows or denies by fixed policy — no model in the file-open, exec, or
 connect path, ever. A model runs only *async* (score the event stream after the

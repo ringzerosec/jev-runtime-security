@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The 13 attack categories from `EnforcementCategories` (agent/src/config.rs),
-one specialist model per category.
+"""The 13 attack categories from `EnforcementCategories` (agent/src/config.rs).
+ONE reflex model answers all 13 — one question template per category (see
+`THE-BRAIN.md`). They are 13 categories, not 13 models.
 
-Each category is trained as its own multiple-choice classifier over a small,
-fixed option set (benign -> more severe). `RANK` mirrors the monotonic idea in
-`checks/src/lib.rs::severity_rank`: a model may only ever RAISE severity; the
-daemon clamps it, and unknown options rank 0 so they can never downgrade.
+Each category is a multiple-choice question over a small, fixed option set
+(benign -> more severe). `RANK` mirrors the monotonic idea in
+`checks/src/lib.rs::severity_rank`: a model may only ever RAISE severity
+(tighten-only); the daemon clamps it, and unknown options rank 0 so they can
+never downgrade.
 
-`ENFORCEMENT` records how each category is *acted on*, because the one rule
-holds: a model never decides a syscall. `kernel` categories reduce to a syscall
-the kernel blocks deterministically (the model only raises/detects). The rest
-are content/intent categories where the model is the primary detector and the
-action is taint / quarantine / review, not a syscall block.
+`ENFORCEMENT` records how each category is *acted on*. The one rule, stated
+correctly: no model runs in a syscall; the model DECIDES off the hot path and
+the kernel EXECUTES the precomputed bit. `kernel` categories reduce to a syscall
+the kernel refuses deterministically. The rest are content/intent categories
+where the model is the primary decider and the action is the enforce bit /
+taint / quarantine / review (THE-BRAIN.md, "calibrated-confidence tiers").
 """
 
 # category -> options, ordered benign..severe (rank = index here, by construction)
