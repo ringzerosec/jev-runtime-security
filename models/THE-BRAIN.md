@@ -98,13 +98,17 @@ Guardrails, all of which already exist in the design:
 ## 6. Why a small on-device model can carry this
 
 "Does this artifact, given this policy and this session, express intent to
-circumvent?" is a **typed decision over text** — exactly what an RLCD encoder
-does in one forward pass. Fine-tuned Laya (~421M, ~0.4 GB int8) carries the
-per-artifact / per-event reflex **on-device**, for all 13 enforcement
-categories: **13 categories are 13 question templates, one model** — not 13
-models. Multi-step reasoning over a whole session is the heavier judgment
-model, self-hosted by the customer. Both are the brain; one is the fast part.
-Inventory and sizes: `ROSTER.md`.
+circumvent?" is a **typed decision over the agent's state** — one forward pass
+of an encoder stack with a verdict head. The reflex is **System 1** in
+Kahneman's sense: fast, always on, perceptual, with a calibrated feeling of
+confidence; the session-level judgment model is **System 2**, invoked when
+System 1 abstains. Today the reflex is text-only (fine-tuned Laya, ~421M,
+~0.4 GB int8) and carries all 13 enforcement categories on-device — **13
+categories are 13 question templates, one model**, not 13 models. The
+direction is a perception stack over every sense an agent has — kernel events
+first, text, then screen and audio — with the same heads on top
+(`RESEARCH.md`). Both tiers are the brain; one is the fast part. Inventory
+and sizes: `ROSTER.md`.
 
 ## 7. Status — honest, and it must match the code
 

@@ -40,6 +40,12 @@ source, not from the chapter.
 Order: P1 → P2 → P3, then L1 → L10. The exercises in L4, L8 and L10 plus the
 P2.8 drill are the whole test.
 
+**Where the research goes next** — `models/RESEARCH.md`: the System 1 / System 2
+mapping, the tower → fusion → heads architecture (kernel events, text, SigLIP2,
+Whisper), what from the L-track is kept (heads, calibration, gate, contract,
+loop) and what is replaced (the single text tower), and the first five
+experiments. Read it after L10.
+
 ## Producing the public zip (learners get this; never the directory above)
 
 From the repo root, excluding this track *and* the lab build artifacts:

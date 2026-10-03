@@ -9,6 +9,11 @@
 They plug into the registry (`checks/src/registry.rs`) under one contract, so
 swapping or adding a model is a config route, not a code change.
 
+> **Direction (2026-10-03):** the reflex tier is being rebuilt as a System 1
+> perception stack — kernel-event tower + text tower, later vision (SigLIP2)
+> and audio (Whisper) — with Laya's heads and calibration kept on top. Laya v1
+> below is the text-only baseline until that beats it. See `RESEARCH.md`.
+
 | Tier | Job | Base model | On-device? | ~Size (int8) |
 |---|---|---|---|---|
 | **Reflex** (per-event / per-artifact) — **all 13 categories** | typed decision per `EnforcementCategory`, including the core one: *does this written artifact express intent to circumvent policy?* | **Laya** — `convaiinnovations/laya`, **Apache-2.0**, ModernBERT-large encoder ~421M (mmBERT-base ~322M multilingual) — **LOCKED** | ✅ | **571 MB** (int8 ONNX, measured) |
