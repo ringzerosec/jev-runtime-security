@@ -11,14 +11,17 @@ swapping or adding a model is a config route, not a code change.
 
 | Tier | Job | Base model | On-device? | ~Size (int8) |
 |---|---|---|---|---|
-| **Reflex** (per-event / per-artifact) — **all 13 categories** | typed decision per `EnforcementCategory`, including the core one: *does this written artifact express intent to circumvent policy?* | **Laya** — `convaiinnovations/laya`, **Apache-2.0**, ModernBERT-large encoder ~421M (mmBERT-base ~322M multilingual) — **LOCKED** | ✅ | **~0.4 GB** |
+| **Reflex** (per-event / per-artifact) — **all 13 categories** | typed decision per `EnforcementCategory`, including the core one: *does this written artifact express intent to circumvent policy?* | **Laya** — `convaiinnovations/laya`, **Apache-2.0**, ModernBERT-large encoder ~421M (mmBERT-base ~322M multilingual) — **LOCKED** | ✅ | **571 MB** (int8 ONNX, measured) |
 | **DLP** | secret / PII spans | GLiNER-small family (open, Apache/MIT) — also an encoder | ✅ | ~0.2–0.4 GB *(est.)* |
 | **Malware** (bounded) | agent-written / downloaded file → malicious? | small YARA-labelled encoder (`models/malware/`); may fold into Laya if a pilot shows it carries the decision | ✅ | ~0.1–0.2 GB *(est.)* |
 | **Judgment** (per-session) | multi-step reasoning over a whole trace; operator-defined behaviours; a verdict **with an explanation** for the audit trail | ~4B **generative** fine-tune (Kev / Qwen class) — **adopt + fine-tune, never pretrain** | ❌ **customer-self-hosted** (on-prem box); **absent** in the sealed-sandbox SKU | ~8 GB (off the box) |
 
-**On-device total ≈ 0.7–1.0 GB, int8.** The heavy reasoning model never lives
-on the endpoint. *(Sizes are derived from parameter counts; measured artifact
-sizes go in `bench/` when the ONNX export is benchmarked.)*
+**On-device total ≈ 0.9–1.2 GB, int8** (Laya **measured** at 571 MB,
+self-contained int8 ONNX; DLP/malware still estimates). The heavy reasoning
+model never lives on the endpoint. **Shipping-path latency, measured
+(2026-10-03, Apple M5 CPU, onnxruntime, int8):** ~160 ms per single 68-token
+row (min 152 ms), and the int8 decision matches the fp32 model (same argmax;
+P(gold) 0.56 vs 0.60).
 
 ## 13 categories, one reflex model
 
@@ -53,8 +56,9 @@ Laya's `score` type is an ordinal severity (0..N) — a clean fit for our
 benign→severe option sets and tighten-only. **Honest caveats:** 5 hand-written
 cases is a **smoke test, not a benchmark** (`bench/` is the real measure, and
 its bootstrap set is synthetic and labelled so). Laya's 33 ms figure is
-**GPU/ONNX**; on CPU, unoptimized, it is hundreds of ms to ~2 s — the shipping
-path is the ONNX-int8 export and *that* number is the one to measure. Laya's
+**GPU/ONNX**; on CPU, unoptimized PyTorch, it is hundreds of ms to ~2 s. The
+shipping path is the ONNX-int8 export, **measured at ~160 ms/row on an M5 CPU**
+(see above). Laya's
 base checkpoint is weak on domain decisions (their own typed-decisions set:
 0.362 base → 0.766 fine-tuned); the categories are earned through the training
 loop, not zero-shot.
@@ -90,8 +94,9 @@ numbers need held-out pilot rows. Weights/ONNX live outside git
    five `multi_step_evasion` seed rows). Re-run the 5 cases + the benchmark.
 2. **Wire Laya through the registry** (`DecisionEndpoint` → `laya.predict`,
    ONNX, sealed path) — end to end, on-device.
-3. **Benchmark the shipping path:** ONNX-int8 latency (single + batch of 10) and
-   artifact size, CPU and MPS — replace every estimate above with a number.
+3. **Benchmark the shipping path** — single-row int8 CPU latency and artifact
+   size are measured (~160 ms, 571 MB; see above). Still to do: batch-of-10,
+   MPS, and the DLP / malware encoders.
 4. **Implement the calibrated-confidence tiers** (enforce / contain / review),
    gated as in `THE-BRAIN.md` §5 — the `GPL/` side as an issue + diff.
 5. The training loop then feeds confirmed misses back (`TRAINING-LOOP.md`),
