@@ -74,6 +74,16 @@ No weights ship in this release; the shipped checks are deterministic
 calibrated-confidence model→enforce path is the next target (`THE-BRAIN.md` §5,
 §7). Nothing here is a claim that a model blocks anything *yet*.
 
+**Loop proven end to end (2026-10-03, Apple M5 / MPS).** `laya_feed.py` →
+Laya's upstream MPS trainer → `laya_eval.py`, from the `typed-decisions`
+checkpoint, on the 9 oracle/seed rows in `misses/` (2 epochs, loss 1.02 → 0.37,
+minutes). Training-set fit 4/9 → 9/9, mean P(gold) 0.42 → 0.85, shuffled-context
+delta +0.22 → +0.56 (it reads the situation, not option priors). That is a
+**smoke test on the training rows — not a benchmark**: no held-out set, no
+calibration rows (temperatures defaulted to 1.2). It proves the pipeline; real
+numbers need held-out pilot rows. Weights/ONNX live outside git
+(`models/data/`, `~/laya_v1_out`) — model IP, private only.
+
 ## Next
 
 1. **Fine-tune Laya v1** on `build_dataset.py` output + `misses/` (including the

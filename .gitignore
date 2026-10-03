@@ -35,3 +35,7 @@ GPL/bpf/vmlinux.h
 .venv/
 **/__pycache__/
 *.pyc
+models/data/
+models/weights/
+models/**/*.pt
+models/**/*.safetensors
