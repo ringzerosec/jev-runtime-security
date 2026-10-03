@@ -39,3 +39,8 @@ models/data/
 models/weights/
 models/**/*.pt
 models/**/*.safetensors
+# course lab build artifacts — regenerable in the lab VM; keep the sources
+course/labs/**/vmlinux.h
+course/labs/**/*.o
+course/labs/**/target/
+course/labs/00-setup/hello
