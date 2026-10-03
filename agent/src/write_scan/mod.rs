@@ -462,8 +462,10 @@ pub fn scan_protected_intent(content: &str, protected: &ProtectedPaths) -> Vec<C
 /// without a kernel, a filesystem or a model.
 ///
 /// `pattern_worst` is the worst severity a deterministic rule produced.
-/// `model_severity` is what the optional model layer said, if it ran.
-/// The enforce bit is a function of `pattern_worst` ALONE.
+/// `model_severity` is what the model layer (the brain's reflex tier, run off
+/// the hot path) said, if it ran. In v1 as shipped the enforce bit is a
+/// function of `pattern_worst` ALONE; the calibrated-confidence tiers that let
+/// a model set it are designed in models/THE-BRAIN.md §5/§7, not yet here.
 pub fn decide(
     pattern_worst: Option<Severity>,
     model_severity: Option<Severity>,
