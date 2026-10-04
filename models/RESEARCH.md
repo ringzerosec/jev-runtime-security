@@ -81,6 +81,25 @@ are present (missing modalities are simply absent, not zero-filled) and emits
 one state vector. This is the only new backbone we train from scratch, and it
 is deliberately small.
 
+**Head design note (from Gero-4B, 2026-10-04).** Gero's *branch readout* —
+one shared `Linear(hidden, 1)` scorer, each option its own branch that sees the
+prefix but not the other options, softmax across branches — has **zero
+position bias by construction** and handles any option count with one set of
+weights. Laya packs options into one sequence with `[MASK]` markers, so options
+see each other and bias has to be corrected afterwards (permutation,
+per-bucket temperatures). Prefer the branch readout for any head we build on a
+decoder backbone (System 2), and the per-option cross-encoder equivalent on
+the fusion stack. Also adopt from Gero: the pre-train data checker (leak,
+position, majority-text, string-presence), the reward fixed-point test, the
+zero-gradient-at-truth rule for any added loss term, Murphy
+reliability/resolution, and `correct = soft[pred]` on ambiguous items.
+
+**System 2 is a scorer, not a chatbot.** Gero shows a 4B backbone + LoRA on the
+last layers + branch scorer yields calibrated typed decisions from the same
+model that would otherwise generate text. The judgment tier should be built
+this way: same `DecisionEndpoint` contract and confidence semantics as System
+1, no letter parsing.
+
 **Heads.** Carried over from Laya unchanged in design: typed decision heads
 (choice / ordinal score / boolean), the **abstain head**, proper-scoring
 training, per-type *and* per-option-count temperature calibration, the
@@ -129,6 +148,26 @@ accuracy, held-out ECE, shuffled-context delta, FP floor on benign sessions —
 plus **held-out attack families** (train on N−1 mechanisms, test on the unseen
 one; report the tighten direction).
 
+- **E0 — Baselines, measured (2026-10-04, M5 16 GB, 9 rows — a smoke signal,
+  not a benchmark).** Zero-shot on our rows, same metrics (`laya_eval.py`,
+  `gero_eval.py`):
+
+  | model | acc | mean P(gold) | shuffled acc | delta | ms/question |
+  |---|---|---|---|---|---|
+  | Laya base `typed-decisions` (421M, zero-shot) | 4/9 | 0.42 | 0.22 | +0.22 | ~160 (int8 CPU) |
+  | **Gero-4B** (Qwen3-4B branch scorer, zero-shot) | 2/9 | 0.29 | 0.22 | **+0.00** | ~36,000 (fp16 MPS, swap-bound) |
+  | Laya v1 (fine-tuned on these rows — training fit, not generalisation) | 9/9 | 0.85 | 0.44 | +0.56 | ~160 |
+
+  Reading: a generic 4B decision model with no domain data does **not** read a
+  security situation better than a 421M one — Gero's delta of 0.00 means its
+  verdicts did not change when the state was swapped; it answered from option
+  priors. This is the "data is the moat, not the recipe" claim, measured.
+  Caveats: n=9; snake_case option labels (`staging_for_exfiltration`) may
+  under-serve Gero's "option - description" training format (retry with
+  `schema.py` descriptions is cheap); the latency is a 16 GB machine thrashing,
+  not the model. The real Gero question — does a 4B *fine-tuned* scorer
+  generalise to unseen attack families better than Laya — needs a GPU and is
+  folded into E2/E3.
 - **E1 — Kernel-event tokenizer + tower.** Define the event vocabulary
   (process, exec, open/write with taint bit, connect, timing buckets), train a
   small transformer on recorded sessions (`bench/scenarios.jsonl` +
