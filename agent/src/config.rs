@@ -156,6 +156,9 @@ pub struct DlpSection {
     pub key_routes: Vec<DlpKeyRouteEntry>,
     /// PII detection/redaction settings
     pub pii: PiiSection,
+    /// Secrets pasted into an agent prompt: off | warn | block. Checked on the
+    /// agent's UserPromptSubmit hook, locally; see secrets/prompt_guard.rs.
+    pub prompt_guard: crate::secrets::prompt_guard::PromptGuardMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,6 +299,7 @@ impl Default for DlpSection {
             enforce: true,
             key_routes: vec![],
             pii: PiiSection::default(),
+            prompt_guard: crate::secrets::prompt_guard::PromptGuardMode::default(),
         }
     }
 }

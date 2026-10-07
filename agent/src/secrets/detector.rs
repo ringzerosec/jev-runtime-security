@@ -120,6 +120,31 @@ pub fn mask(value: &str) -> String {
     format!("{}{}{}", &value[..4], stars, &value[value.len() - 4..])
 }
 
+/// Byte ranges of every secret VALUE in `content`, with its kind. For patterns
+/// that match `name = "value"`, only the captured value is returned, so masking
+/// the span keeps the surrounding text readable. Spans are sorted and
+/// non-overlapping (the first, longest match at a position wins).
+pub fn find_spans(content: &str) -> Vec<(SecretKind, std::ops::Range<usize>)> {
+    let mut spans: Vec<(SecretKind, std::ops::Range<usize>)> = Vec::new();
+    for pat in PATTERNS.iter() {
+        for caps in pat.regex.captures_iter(content) {
+            let m = caps.get(1).or_else(|| caps.get(0));
+            if let Some(m) = m {
+                spans.push((pat.kind.clone(), m.start()..m.end()));
+            }
+        }
+    }
+    spans.sort_by(|a, b| a.1.start.cmp(&b.1.start).then(b.1.end.cmp(&a.1.end)));
+    let mut out: Vec<(SecretKind, std::ops::Range<usize>)> = Vec::new();
+    for (k, r) in spans {
+        if out.last().is_some_and(|(_, last)| r.start < last.end) {
+            continue;
+        }
+        out.push((k, r));
+    }
+    out
+}
+
 pub fn scan_content(content: &str, file_path: &str) -> Vec<SecretFinding> {
     let mut findings = Vec::new();
 

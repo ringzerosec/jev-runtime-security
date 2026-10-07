@@ -3330,6 +3330,17 @@ async fn receive_hook_event(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    // ── Prompt guard ───────────────────────────────────────────────────────
+    // A secret pasted into a prompt is checked here, locally, before the agent
+    // sends it anywhere. The verdict's REDACTED text is what gets recorded.
+    let prompt_verdict = match (hook_event, prompt.as_deref()) {
+        ("UserPromptSubmit" | "UserInput" | "user_input", Some(text)) => {
+            let mode = crate::config::DaemonConfig::load().dlp.prompt_guard;
+            Some(crate::secrets::prompt_guard::check(text, mode))
+        }
+        _ => None,
+    };
+
     tracing::info!(
         hook_event,
         session_id,
@@ -3645,7 +3656,16 @@ async fn receive_hook_event(
     // Emit as SecurityEvent based on event type
     match hook_event {
         "UserPromptSubmit" | "UserInput" | "user_input" => {
-            if let Some(ref text) = prompt {
+            if let Some(ref raw) = prompt {
+                // Never store the raw prompt when it held a secret.
+                let text = prompt_verdict
+                    .as_ref()
+                    .map(|v| v.redacted.clone())
+                    .unwrap_or_else(|| raw.clone());
+                let (allowed, reason) = match prompt_verdict.as_ref() {
+                    Some(v) if !v.findings.is_empty() => (!v.block, v.reason()),
+                    _ => (true, None),
+                };
                 let ev = crate::common::event::SecurityEvent {
                     id: format!(
                         "hook-{}-{}",
@@ -3656,9 +3676,13 @@ async fn receive_hook_event(
                     pid: 0,
                     uid: 0,
                     process: agent_type.to_string(),
-                    target: format!("{}:hook", agent_type),
-                    allowed: true,
-                    reason: None,
+                    target: if allowed && reason.is_none() {
+                        format!("{}:hook", agent_type)
+                    } else {
+                        format!("{}:prompt-secret", agent_type)
+                    },
+                    allowed,
+                    reason,
                     timestamp: chrono::Utc::now(),
                     ppid: None,
                     parent_process: None,
@@ -3670,7 +3694,18 @@ async fn receive_hook_event(
                         usage: None,
                         response_ts: chrono::Utc::now(),
                     }),
-                    extra: Some(hook_extra("prompt")),
+                    extra: Some({
+                        let mut x = hook_extra("prompt");
+                        if let (Some(v), Some(obj)) = (prompt_verdict.as_ref(), x.as_object_mut()) {
+                            if !v.findings.is_empty() {
+                                obj.insert("prompt_guard".into(), serde_json::json!({
+                                    "blocked": v.block,
+                                    "findings": v.findings,
+                                }));
+                            }
+                        }
+                        x
+                    }),
                 };
                 record(ev);
             }
@@ -3800,12 +3835,17 @@ async fn receive_hook_event(
     // refusal. It names the RULE THAT FIRED and nothing else: no allow-list, no
     // policy contents, no protected-path inventory.
     // Only when actually denying: an allow carries no reason for the model.
-    let reason = if decision_deny {
-        decision_rule.as_deref().map(|rule| {
+    if let Some(v) = prompt_verdict.as_ref().filter(|v| v.block) {
+        decision_deny = true;
+        decision_rule = Some("secret in prompt".to_string());
+        let _ = v;
+    }
+    let reason = match prompt_verdict.as_ref().filter(|v| v.block) {
+        Some(v) => v.reason(),
+        None if decision_deny => decision_rule.as_deref().map(|rule| {
             format!("Ring Zero policy: {rule}. This tool call is out of policy for this agent.")
-        })
-    } else {
-        None
+        }),
+        None => None,
     };
     Json(serde_json::json!({
         "status": "ok",
