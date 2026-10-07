@@ -2165,6 +2165,7 @@ async fn policy_profiles(State(_state): State<ApiState>) -> impl IntoResponse {
     Json(serde_json::json!({
         "stage": "observe",
         "mode": cfg.daemon.mode,
+        "tamper_protection": cfg.daemon.tamper_protection,
         "prompt_guard": cfg.dlp.prompt_guard,
         "profiles": crate::policy::capability::ENGINE.report(),
     }))

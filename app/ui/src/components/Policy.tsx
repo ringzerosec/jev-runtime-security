@@ -13,7 +13,7 @@ import { useEffect, useState } from 'react';
 import { daemonApi } from '../lib/daemonApi';
 import { Badge } from './ui/badge';
 import { cn } from '../lib/utils';
-import FileAccess from './FileAccess';
+import ProtectedData from './ProtectedData';
 import Enforcement from './Enforcement';
 import {
   Lock,
@@ -51,8 +51,28 @@ interface Profile {
 interface PolicyState {
   stage: string;
   mode: string;
+  tamper_protection?: boolean;
   prompt_guard: 'off' | 'warn' | 'block';
   profiles: Profile[];
+}
+
+/** One posture tile: green when on, amber when off, neutral when informational. */
+function Posture({ ok, label, value }: { ok: boolean | null; label: string; value: string }) {
+  return (
+    <div
+      className={cn(
+        'rounded-xl border px-4 py-3',
+        ok === true && 'border-emerald-500/25 bg-emerald-500/5',
+        ok === false && 'border-amber-500/30 bg-amber-500/5',
+        ok === null && 'bg-card',
+      )}
+    >
+      <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className={cn('text-sm font-semibold mt-0.5', ok === true && 'text-emerald-600', ok === false && 'text-amber-600')}>
+        {value}
+      </div>
+    </div>
+  );
 }
 
 function SectionTitle({
@@ -79,75 +99,79 @@ function SectionTitle({
   );
 }
 
-function networkLine(p: Profile): string {
-  if (p.allow_hosts.length === 0) return 'No network access';
-  if (p.allow_hosts.includes('*')) return 'Any host';
-  return `Only ${p.allow_hosts.join(', ')}`;
-}
-function programsLine(p: Profile): string {
-  if (!p.allow_spawn) return 'May not start other programs';
-  if (p.allow_programs.length === 0) return 'May start any program';
-  return `Only ${p.allow_programs.join(', ')}`;
+function Chips({ items, empty, max = 4 }: { items: string[]; empty: string; max?: number }) {
+  const [all, setAll] = useState(false);
+  if (items.length === 0) return <span className="text-muted-foreground">{empty}</span>;
+  const shown = all ? items : items.slice(0, max);
+  return (
+    <span className="flex flex-wrap items-center gap-1">
+      {shown.map((it) => (
+        <span key={it} className="rounded-md border bg-muted/40 px-1.5 py-0.5 font-mono text-[11px]">
+          {it}
+        </span>
+      ))}
+      {items.length > max && (
+        <button onClick={() => setAll((a) => !a)} className="text-[11px] text-primary hover:underline">
+          {all ? 'show less' : `+${items.length - max} more`}
+        </button>
+      )}
+    </span>
+  );
 }
 
 function ProfileCard({ p }: { p: Profile }) {
   const [open, setOpen] = useState(false);
   const Icon = p.kind === 'agent' ? Bot : Plug;
   const blocked = p.stats.would_block;
+  const anyHost = p.allow_hosts.includes('*');
   return (
-    <div className="rounded-lg border bg-card">
-      <div className="px-4 py-3 flex items-start justify-between gap-4">
-        <div className="flex items-start gap-3 min-w-0">
-          <div className="p-2 rounded-md bg-muted">
-            <Icon className="h-4 w-4" />
+    <div className="rounded-xl border bg-card">
+      <div className="px-5 py-4 flex items-start gap-4">
+        <div className="p-2 rounded-lg bg-muted shrink-0">
+          <Icon className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1 space-y-2.5">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold">{p.name}</span>
+            <span className="text-xs text-muted-foreground">{p.kind === 'agent' ? 'Agent' : 'MCP server'}</span>
           </div>
-          <div className="min-w-0">
-            <div className="text-sm font-medium">
-              {p.name}{' '}
-              <span className="text-xs font-normal text-muted-foreground">
-                {p.kind === 'agent' ? 'Agent' : 'MCP server'}
-              </span>
-            </div>
-            <div className="mt-1.5 space-y-1 text-xs">
-              <div className="flex items-center gap-1.5">
-                <Globe className="h-3.5 w-3.5 text-muted-foreground" />
-                {networkLine(p)}
-              </div>
-              <div className="flex items-center gap-1.5">
-                <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
-                {programsLine(p)}
-              </div>
-            </div>
+          <div className="grid grid-cols-[88px_1fr] gap-x-3 gap-y-2 text-xs">
+            <span className="flex items-center gap-1.5 text-muted-foreground">
+              <Globe className="h-3.5 w-3.5" /> Network
+            </span>
+            {anyHost ? <span>Any host</span> : <Chips items={p.allow_hosts} empty="No network access" />}
+            <span className="flex items-center gap-1.5 text-muted-foreground">
+              <Terminal className="h-3.5 w-3.5" /> Programs
+            </span>
+            {!p.allow_spawn ? (
+              <span>May not start other programs</span>
+            ) : (
+              <Chips items={p.allow_programs} empty="Any program" max={6} />
+            )}
           </div>
         </div>
-        <div className="text-right shrink-0">
-          <div className="text-xs text-muted-foreground tabular-nums">{p.stats.allowed} allowed</div>
-          <div
-            className={cn(
-              'text-sm font-semibold tabular-nums',
-              blocked ? 'text-amber-500' : 'text-muted-foreground',
-            )}
-          >
-            {blocked} would block
+        <div className="text-right shrink-0 w-28">
+          <div className={cn('text-2xl font-semibold tabular-nums leading-none', blocked ? 'text-amber-500' : 'text-muted-foreground/60')}>
+            {blocked}
           </div>
+          <div className="text-[11px] text-muted-foreground mt-1">would block</div>
+          <div className="text-[11px] text-muted-foreground tabular-nums">{p.stats.allowed} allowed</div>
         </div>
       </div>
       {p.recent.length > 0 && (
         <div className="border-t">
           <button
             onClick={() => setOpen((o) => !o)}
-            className="w-full px-4 py-2 flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+            className="w-full px-5 py-2 flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
           >
             {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
             Latest {p.recent.length} outside this profile
           </button>
           {open && (
-            <div className="px-4 pb-3 space-y-1.5">
+            <div className="px-5 pb-3 space-y-1.5">
               {p.recent.map((v, i) => (
                 <div key={i} className="text-xs flex gap-2">
-                  <span className="text-muted-foreground tabular-nums shrink-0">
-                    {new Date(v.at).toLocaleTimeString()}
-                  </span>
+                  <span className="text-muted-foreground tabular-nums shrink-0">{new Date(v.at).toLocaleTimeString()}</span>
                   <span className="font-mono">{v.process}</span>
                   <span className="text-muted-foreground">{v.detail}</span>
                 </div>
@@ -219,41 +243,42 @@ export default function Policy() {
         </p>
       </div>
 
+      {/* Posture at a glance */}
+      {state && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Posture
+            ok={state.mode === 'enforce'}
+            label="Mode"
+            value={state.mode === 'enforce' ? 'Enforcing' : 'Watching only'}
+          />
+          <Posture
+            ok={state.tamper_protection !== false}
+            label="Tamper protection"
+            value={state.tamper_protection !== false ? 'On' : 'Off'}
+          />
+          <Posture
+            ok={state.prompt_guard === 'block'}
+            label="Secrets in prompts"
+            value={state.prompt_guard === 'block' ? 'Blocked' : state.prompt_guard === 'warn' ? 'Recorded' : 'Not checked'}
+          />
+          <Posture
+            ok={null}
+            label="Agent permissions"
+            value={`${state.profiles.length} profile${state.profiles.length === 1 ? '' : 's'} · watching`}
+          />
+        </div>
+      )}
+
       {error && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3 text-xs text-red-500">
           {error}
         </div>
       )}
 
-      {/* 1 — Mode */}
-      <section>
-        <SectionTitle n={1} title="Mode" question="How strict is this machine?" />
-        <div
-          className={cn(
-            'rounded-lg border px-5 py-4 flex items-center gap-4',
-            enforcing ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-amber-500/30 bg-amber-500/5',
-          )}
-        >
-          {enforcing ? (
-            <ShieldCheck className="h-6 w-6 text-emerald-500" />
-          ) : (
-            <Eye className="h-6 w-6 text-amber-500" />
-          )}
-          <div>
-            <div className="text-sm font-semibold">{enforcing ? 'Enforcing' : 'Watching only'}</div>
-            <div className="text-xs text-muted-foreground">
-              {enforcing
-                ? 'Protected files below are refused by the kernel for every agent and everything it starts. Other sections say if they are enforced.'
-                : 'Everything is recorded; nothing is refused yet.'}
-            </div>
-          </div>
-        </div>
-      </section>
-
       {/* 2 — Protected data */}
       <section>
         <SectionTitle
-          n={2}
+          n={1}
           title="Protected data"
           question="What may no agent ever touch?"
           right={
@@ -262,13 +287,13 @@ export default function Policy() {
             </Badge>
           }
         />
-        <FileAccess embedded />
+        <ProtectedData />
       </section>
 
       {/* 3 — Capability profiles */}
       <section>
         <SectionTitle
-          n={3}
+          n={2}
           title="Agent & tool permissions"
           question="What may each agent and MCP server do?"
           right={
@@ -306,7 +331,7 @@ export default function Policy() {
 
       {/* 4 — Prompts */}
       <section>
-        <SectionTitle n={4} title="Prompts" question="What happens to a secret pasted into a prompt?" />
+        <SectionTitle n={3} title="Prompts" question="What happens to a secret pasted into a prompt?" />
         <div className="rounded-lg border bg-card px-5 py-4 flex items-start gap-4">
           <MessageSquareLock className="h-5 w-5 mt-0.5 text-muted-foreground" />
           <div className="flex-1">
