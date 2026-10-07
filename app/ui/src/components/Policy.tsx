@@ -9,11 +9,14 @@
 // The older per-category alert settings sit at the bottom, collapsed, because
 // they record violations rather than refuse anything.
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { daemonApi } from '../lib/daemonApi';
 import { Badge } from './ui/badge';
 import { cn } from '../lib/utils';
 import ProtectedData from './ProtectedData';
+import { runPrivilegedSequence, describeFailure } from '@/lib/privileged';
+import { toast } from './ui/toast';
+import PermissionsPanel from './PermissionsPanel';
 import Enforcement from './Enforcement';
 import {
   Lock,
@@ -54,6 +57,24 @@ interface PolicyState {
   tamper_protection?: boolean;
   prompt_guard: 'off' | 'warn' | 'block';
   profiles: Profile[];
+}
+
+function ToggleSwitch({ on, busy, label, onChange }: { on: boolean; busy?: boolean; label: string; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={busy}
+      onClick={() => onChange(!on)}
+      className={cn(
+        'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+        on ? 'bg-primary' : 'bg-muted-foreground/30',
+      )}
+    >
+      <span className={cn('inline-block h-5 w-5 rounded-full bg-white shadow transition-transform', on ? 'translate-x-5' : 'translate-x-0.5')} />
+    </button>
+  );
 }
 
 /** One posture tile: green when on, amber when off, neutral when informational. */
@@ -207,26 +228,45 @@ export default function Policy() {
   const [error, setError] = useState<string | null>(null);
   const [showCategories, setShowCategories] = useState(false);
 
+  const load = useCallback(async () => {
+    try {
+      setState(await daemonApi<PolicyState>('GET', '/api/v1/policy/profiles'));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not reach the daemon');
+    }
+  }, []);
   useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const s = await daemonApi<PolicyState>('GET', '/api/v1/policy/profiles');
-        if (alive) {
-          setState(s);
-          setError(null);
-        }
-      } catch (e) {
-        if (alive) setError(e instanceof Error ? e.message : 'Could not reach the daemon');
-      }
-    };
     void load();
     const t = setInterval(load, 5000); // live "would block" counts
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, []);
+    return () => clearInterval(t);
+  }, [load]);
+
+  // One privileged change, asked for and applied immediately — the same
+  // password prompt every time, never cached.
+  const [applying, setApplying] = useState<string | null>(null);
+  const applySetting = async (key: 'tamper_protection' | 'prompt_guard', value: string) => {
+    setApplying(key);
+    try {
+      const r = await runPrivilegedSequence([['settings', 'set', key, value]]);
+      if (r.ok) {
+        toast({ variant: 'success', title: 'Saved', description: 'The change is in effect.' });
+        await load();
+      } else {
+        const { title, description } = describeFailure(r);
+        toast({ variant: 'error', title, description });
+      }
+    } finally {
+      setApplying(null);
+    }
+  };
+  const offProtections = state
+    ? [
+        state.tamper_protection === false && 'Tamper protection is off',
+        state.prompt_guard === 'off' && 'Secrets in prompts are not checked',
+        state.mode !== 'enforce' && 'This machine is only watching; nothing is refused',
+      ].filter(Boolean)
+    : [];
 
   const enforcing = state?.mode === 'enforce';
   const pg = PROMPT_GUARD_TEXT[state?.prompt_guard ?? 'warn'];
@@ -264,8 +304,14 @@ export default function Policy() {
           <Posture
             ok={null}
             label="Agent permissions"
-            value={`${state.profiles.length} profile${state.profiles.length === 1 ? '' : 's'} · watching`}
+            value={`${state.profiles.length} profile${state.profiles.length === 1 ? '' : 's'} · detect only`}
           />
+        </div>
+      )}
+
+      {offProtections.length > 0 && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
+          <span className="font-semibold">Protection is reduced.</span> {offProtections.join(' · ')}.
         </div>
       )}
 
@@ -276,9 +322,35 @@ export default function Policy() {
       )}
 
       {/* 2 — Protected data */}
+      {/* Product security */}
+      <section>
+        <SectionTitle n={1} title="Product security" question="Can anything switch Ring Zero off?" />
+        <div className="rounded-xl border bg-card divide-y">
+          <div className="flex items-center gap-4 px-5 py-4">
+            <div className="flex-1">
+              <div className="text-sm font-semibold flex items-center gap-1.5">
+                Tamper protection <Lock className="h-3 w-3 text-muted-foreground" aria-label="Needs an administrator" />
+              </div>
+              <div className="text-xs text-muted-foreground mt-0.5">
+                No agent can stop, debug or unload Ring Zero, or touch its settings. Turning this off asks for the administrator password.
+              </div>
+            </div>
+            <ToggleSwitch
+              on={state?.tamper_protection !== false}
+              busy={applying === 'tamper_protection'}
+              label="Tamper protection"
+              onChange={(v) => applySetting('tamper_protection', v ? 'on' : 'off')}
+            />
+          </div>
+          <div className="flex items-center gap-4 px-5 py-3 text-xs text-muted-foreground">
+            <Lock className="h-3.5 w-3.5" /> Every change on this page asks for the administrator password. Agents can never make these changes.
+          </div>
+        </div>
+      </section>
+
       <section>
         <SectionTitle
-          n={1}
+          n={2}
           title="Protected data"
           question="What may no agent ever touch?"
           right={
@@ -293,57 +365,51 @@ export default function Policy() {
       {/* 3 — Capability profiles */}
       <section>
         <SectionTitle
-          n={2}
+          n={3}
           title="Agent & tool permissions"
           question="What may each agent and MCP server do?"
           right={
             <Badge variant="outline" className="gap-1 border-amber-500/30 text-amber-500">
-              <Eye className="h-3 w-3" /> Watching — would-block is recorded
+              <Eye className="h-3 w-3" /> Detect only — nothing is blocked yet
             </Badge>
           }
         />
         {state && state.profiles.length === 0 ? (
           <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-            No permissions are set yet. Add a <span className="font-mono">[[profiles]]</span> entry
-            per agent or MCP server in <span className="font-mono">/etc/ringzero/daemon.toml</span>.
+            No agent permissions are set yet.
           </div>
         ) : (
-          <div className="space-y-6">
-            {agents.length > 0 && (
-              <div className="space-y-2">
-                <div className="text-xs text-muted-foreground">Agents</div>
-                {agents.map((p) => (
-                  <ProfileCard key={p.name} p={p} />
-                ))}
-              </div>
-            )}
-            {mcps.length > 0 && (
-              <div className="space-y-2">
-                <div className="text-xs text-muted-foreground">MCP servers</div>
-                {mcps.map((p) => (
-                  <ProfileCard key={p.name} p={p} />
-                ))}
-              </div>
-            )}
-          </div>
+          state && <PermissionsPanel profiles={state.profiles} onSaved={load} />
         )}
       </section>
 
       {/* 4 — Prompts */}
       <section>
-        <SectionTitle n={3} title="Prompts" question="What happens to a secret pasted into a prompt?" />
-        <div className="rounded-lg border bg-card px-5 py-4 flex items-start gap-4">
-          <MessageSquareLock className="h-5 w-5 mt-0.5 text-muted-foreground" />
+        <SectionTitle n={4} title="Prompts" question="What happens to a secret pasted into a prompt?" />
+        <div className="rounded-xl border bg-card px-5 py-4 flex items-center gap-4">
+          <MessageSquareLock className="h-5 w-5 text-muted-foreground shrink-0" />
           <div className="flex-1">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold">Secrets in prompts</span>
-              <Badge variant="outline" className={pg.cls}>
-                {pg.label}
-              </Badge>
+            <div className="text-sm font-semibold flex items-center gap-1.5">
+              Secrets in prompts <Lock className="h-3 w-3 text-muted-foreground" aria-label="Needs an administrator" />
             </div>
-            <div className="text-xs text-muted-foreground mt-1">
-              {pg.text} Checked on this machine; nothing is sent anywhere to check it.
-            </div>
+            <div className="text-xs text-muted-foreground mt-0.5">{pg.text} Checked on this machine; nothing is sent anywhere to check it.</div>
+          </div>
+          <div className="inline-flex rounded-lg border p-0.5 text-xs shrink-0" role="radiogroup" aria-label="Secrets in prompts">
+            {([['off', 'Off'], ['warn', 'Detect'], ['block', 'Block']] as const).map(([val, lab]) => (
+              <button
+                key={val}
+                role="radio"
+                aria-checked={state?.prompt_guard === val}
+                disabled={applying === 'prompt_guard'}
+                onClick={() => state?.prompt_guard !== val && applySetting('prompt_guard', val)}
+                className={cn(
+                  'px-3 py-1.5 rounded-md transition-colors',
+                  state?.prompt_guard === val ? 'bg-primary text-primary-foreground font-medium' : 'text-muted-foreground hover:bg-muted',
+                )}
+              >
+                {lab}
+              </button>
+            ))}
           </div>
         </div>
       </section>

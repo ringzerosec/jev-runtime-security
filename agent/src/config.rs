@@ -312,6 +312,58 @@ impl Default for DlpSection {
     }
 }
 
+// ── Settings changed from the app ─────────────────────────────────────────────
+//
+// A few switches the Policy screen can flip (behind the administrator
+// password). They live in settings.json next to daemon.toml and override it,
+// so the operator's hand-written daemon.toml is never rewritten by the app.
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SettingsOverlay {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tamper_protection: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_guard: Option<crate::secrets::prompt_guard::PromptGuardMode>,
+}
+
+pub fn settings_path() -> PathBuf {
+    config_path().with_file_name("settings.json")
+}
+
+impl SettingsOverlay {
+    pub fn load() -> Self {
+        std::fs::read_to_string(settings_path())
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    /// Merge `update` into the stored overlay and write it atomically.
+    pub fn save_merged(update: &SettingsOverlay) -> Result<SettingsOverlay> {
+        let mut cur = Self::load();
+        if update.tamper_protection.is_some() {
+            cur.tamper_protection = update.tamper_protection;
+        }
+        if update.prompt_guard.is_some() {
+            cur.prompt_guard = update.prompt_guard;
+        }
+        let path = settings_path();
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&cur)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(cur)
+    }
+
+    fn apply(&self, cfg: &mut DaemonConfig) {
+        if let Some(t) = self.tamper_protection {
+            cfg.daemon.tamper_protection = t;
+        }
+        if let Some(p) = self.prompt_guard {
+            cfg.dlp.prompt_guard = p;
+        }
+    }
+}
+
 // ── Load / save ───────────────────────────────────────────────────────────────
 
 impl DaemonConfig {
@@ -319,9 +371,10 @@ impl DaemonConfig {
     pub fn load() -> Self {
         let path = config_path();
         match std::fs::read_to_string(&path) {
-            Ok(content) => match toml::from_str(&content) {
-                Ok(cfg) => {
-                    tracing::info!(path = %path.display(), "Config loaded");
+            Ok(content) => match toml::from_str::<DaemonConfig>(&content) {
+                Ok(mut cfg) => {
+                    tracing::debug!(path = %path.display(), "Config loaded");
+                    SettingsOverlay::load().apply(&mut cfg);
                     cfg
                 }
                 Err(e) => {
@@ -331,7 +384,9 @@ impl DaemonConfig {
             },
             Err(_) => {
                 tracing::info!(path = %path.display(), "Config not found — using defaults");
-                DaemonConfig::default()
+                let mut cfg = DaemonConfig::default();
+                SettingsOverlay::load().apply(&mut cfg);
+                cfg
             }
         }
     }
@@ -344,17 +399,20 @@ impl DaemonConfig {
         let path = config_path();
         match std::fs::read_to_string(&path) {
             Ok(content) => {
-                let cfg: DaemonConfig = toml::from_str(&content)
+                let mut cfg: DaemonConfig = toml::from_str(&content)
                     .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
                 cfg.webhooks
                     .validate()
                     .map_err(|e| anyhow::anyhow!("{}: [webhooks] {}", path.display(), e))?;
+                SettingsOverlay::load().apply(&mut cfg);
                 tracing::info!(path = %path.display(), "Config loaded");
                 Ok(cfg)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::info!(path = %path.display(), "Config not found — using defaults");
-                Ok(DaemonConfig::default())
+                let mut cfg = DaemonConfig::default();
+                SettingsOverlay::load().apply(&mut cfg);
+                Ok(cfg)
             }
             Err(e) => Err(anyhow::anyhow!("{}: {}", path.display(), e)),
         }

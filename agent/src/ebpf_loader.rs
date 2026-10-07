@@ -64,6 +64,11 @@ struct Config {
     tamper_protect: u8,
 }
 
+/// The live command channel into the eBPF subsystem, once it is up. Lets the
+/// API apply a setting (e.g. tamper protection) immediately, without a restart.
+pub static CMD_TX: once_cell::sync::OnceCell<tokio::sync::mpsc::Sender<EbpfCommand>> =
+    once_cell::sync::OnceCell::new();
+
 /// Mirrors `struct write_verdict` in GPL/bpf/ringzero.bpf.c.
 ///
 /// `enforce` is the only field the kernel acts on, and only a deterministic

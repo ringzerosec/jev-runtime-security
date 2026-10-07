@@ -131,6 +131,9 @@ pub fn validate(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        // rz settings set <tamper_protection on|off | prompt_guard off|warn|block>
+        ["settings", "set", "tamper_protection", "on" | "off"] => Ok(()),
+        ["settings", "set", "prompt_guard", "off" | "warn" | "block"] => Ok(()),
         // rz profile set --json <one profile object>
         //
         // The JSON is checked here only for shape (bounded, one object); the
@@ -298,6 +301,10 @@ mod tests {
         assert!(v(&["profile", "remove", "Claude Code"]).is_ok());
         assert!(v(&["profile", "remove", "bad\u{7}name"]).is_err());
         assert!(v(&["profile", "show"]).is_err(), "read-only commands never need root");
+        assert!(v(&["settings", "set", "tamper_protection", "off"]).is_ok());
+        assert!(v(&["settings", "set", "prompt_guard", "block"]).is_ok());
+        assert!(v(&["settings", "set", "tamper_protection", "maybe"]).is_err());
+        assert!(v(&["settings", "set", "mode", "observe"]).is_err(), "only the listed switches");
     }
 
     /// The allow-list is the whole point: a webview that has been taken over

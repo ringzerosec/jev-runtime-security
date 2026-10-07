@@ -744,6 +744,7 @@ async fn async_main() -> Result<()> {
                     slm_l0.attach_l0(cmd_tx.clone()).await;
 
                     // Store sender so daemon event loop can push DLP block decisions
+                    let _ = ebpf_loader::CMD_TX.set(cmd_tx.clone());
                     *cmd_holder.write().await = Some(cmd_tx);
 
                     std::future::pending::<()>().await;

@@ -212,6 +212,7 @@ pub fn make_router(state: ApiState) -> Router {
         .route("/api/v1/discovery/inventory", get(discovery_inventory))
         .route("/api/v1/policy/profiles", get(policy_profiles).put(policy_profile_upsert))
         .route("/api/v1/policy/profiles/:name", delete(policy_profile_remove))
+        .route("/api/v1/policy/settings", axum::routing::put(policy_settings_set))
         .route(
             "/api/v1/scan/baseline",
             get(get_scan_baseline)
@@ -2140,6 +2141,40 @@ async fn policy_profile_upsert(
             (StatusCode::OK, Json(serde_json::json!({ "ok": true, "profiles": list })))
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "error": e }))),
+    }
+}
+
+/// PUT /api/v1/policy/settings — flip a product-security switch.
+/// Body: {"tamper_protection": bool} and/or {"prompt_guard": "off|warn|block"}.
+/// Full-scope token only, and refused from agent callers by the auth layer;
+/// the app reaches this through `rz settings set` under polkit, so the
+/// administrator password is asked every time. Saved to settings.json and
+/// applied live.
+async fn policy_settings_set(
+    State(_state): State<ApiState>,
+    Json(update): Json<crate::config::SettingsOverlay>,
+) -> impl IntoResponse {
+    if update.tamper_protection.is_none() && update.prompt_guard.is_none() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok": false, "error": "nothing to change"})));
+    }
+    match crate::config::SettingsOverlay::save_merged(&update) {
+        Ok(saved) => {
+            if let Some(on) = update.tamper_protection {
+                if let Some(tx) = crate::ebpf_loader::CMD_TX.get() {
+                    let _ = tx.send(crate::ebpf_loader::EbpfCommand::SetTamperProtect(on)).await;
+                }
+                tracing::warn!(on, "Tamper protection changed by an administrator");
+            }
+            if let Some(pg) = update.prompt_guard {
+                tracing::info!(?pg, "Prompt guard changed by an administrator");
+            }
+            let _ = _state.audit.append(
+                crate::audit::AuditEntryType::PolicyChange,
+                serde_json::json!({"action": "update_settings", "settings": &update}),
+            );
+            (StatusCode::OK, Json(serde_json::json!({"ok": true, "settings": saved})))
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"ok": false, "error": e.to_string()}))),
     }
 }
 

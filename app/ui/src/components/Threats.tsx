@@ -188,8 +188,8 @@ export default function Threats() {
     if (threatsReadOnly) {
       toast({
         variant: 'warning',
-        title: 'Needs root',
-        description: `Run: sudo rz file-access remove <id>  (path: ${filename})`,
+        title: 'Needs an administrator',
+        description: `Remove the protection for ${filename} under Policy → Protected data. Saving asks for the administrator password.`,
       });
       return;
     }

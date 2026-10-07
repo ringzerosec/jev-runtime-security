@@ -244,7 +244,7 @@ export default function ProtectedData() {
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && addDraft()}
-          placeholder={draftKind === 'file' ? 'id_rsa  or  /home/me/.config/app/token' : '~/finance  or  /srv/customer-data'}
+          placeholder={draftKind === 'file' ? 'id_rsa  or  ~/.config/app/token' : '~/finance  or  ~/customer-data'}
           className="flex-1 rounded-md border bg-background px-3 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-primary/30"
         />
         <button

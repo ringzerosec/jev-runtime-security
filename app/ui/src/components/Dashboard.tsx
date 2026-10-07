@@ -170,7 +170,7 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
     } catch {
       /* not reachable */
     }
-    setDaemonHint('Run: sudo systemctl start ringzero-daemon');
+    setDaemonHint("Couldn't start the protection service. Restart this computer, or ask your administrator.");
   };
 
   // Fetch sessions

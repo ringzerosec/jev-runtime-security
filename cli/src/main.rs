@@ -689,6 +689,12 @@ enum Commands {
         action: FileAccessCommands,
     },
 
+    /// Product-security switches: tamper protection, secrets in prompts
+    Settings {
+        #[command(subcommand)]
+        action: SettingsCommands,
+    },
+
     /// What each agent and MCP server may do (network, programs, watch/enforce)
     Profile {
         #[command(subcommand)]
@@ -890,6 +896,12 @@ enum EnforcementCommands {
     SetDefault { action: String },
     /// Set one category's action, e.g. `rz enforcement set-category credential_access block`
     SetCategory { category: String, action: String },
+}
+
+#[derive(Subcommand)]
+enum SettingsCommands {
+    /// rz settings set tamper_protection on|off   |   rz settings set prompt_guard off|warn|block
+    Set { key: String, value: String },
 }
 
 #[derive(Subcommand)]
@@ -2305,6 +2317,22 @@ fn operator_home() -> String {
 /// stored and then quietly do nothing fails here with the reason instead. A
 /// trailing `/*` means the directory and everything under it; `--dir` and
 /// `--file` say it outright.
+async fn cmd_settings_set(api: &str, key: &str, value: &str) -> Result<()> {
+    let body = match (key, value) {
+        ("tamper_protection", "on") => serde_json::json!({"tamper_protection": true}),
+        ("tamper_protection", "off") => serde_json::json!({"tamper_protection": false}),
+        ("prompt_guard", v @ ("off" | "warn" | "block")) => serde_json::json!({"prompt_guard": v}),
+        _ => anyhow::bail!("use: tamper_protection on|off, or prompt_guard off|warn|block"),
+    };
+    let v = put_json(&format!("{api}/api/v1/policy/settings"), body).await?;
+    if v["ok"].as_bool() == Some(true) {
+        println!("Saved and applied: {key} = {value}");
+        Ok(())
+    } else {
+        anyhow::bail!("{}", v["error"].as_str().unwrap_or("the daemon refused the change"))
+    }
+}
+
 async fn cmd_profile_show(api: &str) -> Result<()> {
     let v = fetch_json(&format!("{api}/api/v1/policy/profiles")).await?;
     let empty = vec![];
@@ -3279,6 +3307,10 @@ async fn main() -> Result<()> {
                 cmd_file_access_add(&api, &pattern, &a, description.as_deref(), kind).await
             }
             FileAccessCommands::Remove { id, all } => cmd_file_access_remove(&api, &id, all).await,
+        },
+
+        Commands::Settings { action } => match action {
+            SettingsCommands::Set { key, value } => cmd_settings_set(&api, &key, &value).await,
         },
 
         Commands::Profile { action } => match action {
