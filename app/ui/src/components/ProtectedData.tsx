@@ -197,8 +197,8 @@ export default function ProtectedData() {
                   <div className="font-mono text-sm truncate">{r.pattern}</div>
                   <div className="text-xs text-muted-foreground">
                     {dir ? 'Folder and everything in it' : 'File, by name, anywhere'}
-                    {r.description?.replace(/^\s*\[dir-?block\]\s*/i, '').trim()
-                      ? ` · ${r.description.replace(/^\s*\[dir-?block\]\s*/i, '').trim()}`
+                    {r.description?.replace(/^\s*\[(dir-?block|block-?dir)\]\s*/i, '').trim()
+                      ? ` · ${r.description.replace(/^\s*\[(dir-?block|block-?dir)\]\s*/i, '').trim()}`
                       : ''}
                   </div>
                 </div>
