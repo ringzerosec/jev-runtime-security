@@ -245,7 +245,12 @@ struct config {
     // normal session taints before enforcing on it. Takes the third reserved
     // byte; the struct size and the Rust mirror are unchanged.
     u8 taint_on_egress;
-    u8 _reserved[1];
+    // Tamper protection. SEPARATE from enforce_blocks: the daemon, its memory
+    // and the BPF subsystem are protected even when every other rule is only
+    // observing, because an observing product that can be switched off is no
+    // product. Takes the last reserved byte; struct size and Rust mirror are
+    // unchanged.
+    u8 tamper_protect;
 };
 
 // DLP: Tainted PIDs (processes that read sensitive/credential files)
@@ -2013,11 +2018,34 @@ static __always_inline int is_contained(u32 pid) {
 SEC("lsm/ptrace_access_check")
 int BPF_PROG(ringzero_ptrace_access_check, struct task_struct *child, unsigned int mode) {
     struct config *cfg = get_config();
-    if (!cfg || !cfg->enabled || !cfg->enforce_blocks)
+    if (!cfg || !cfg->enabled)
         return 0;
 
     // Get target PID (the process being ptrace'd)
     u32 target_pid = BPF_CORE_READ(child, tgid);
+
+    // TAMPER PROTECTION. Nobody attaches a debugger to the daemon or reads or
+    // writes its memory (ptrace, process_vm_readv/writev and /proc/<pid>/mem
+    // all pass through this check). Root included.
+    if (cfg->tamper_protect && is_daemon_pid(target_pid)) {
+        u32 tcaller = bpf_get_current_pid_tgid() >> 32;
+        if (tcaller != target_pid) {
+            struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+            if (e) {
+                e->type = EVENT_PROCESS_EXEC;
+                e->blocked = 1;
+                fill_process_info(e);
+                __builtin_memset(e->path, 0, MAX_PATH_LEN);
+                const char m[] = "TAMPER:daemon_ptrace_refused";
+                __builtin_memcpy(e->path, m, sizeof(m));
+                bpf_ringbuf_submit(e, 0);
+            }
+            return -EACCES;
+        }
+    }
+
+    if (!cfg->enforce_blocks)
+        return 0;
 
     // Only protect contained processes
     if (!is_contained(target_pid))
@@ -2054,11 +2082,35 @@ int BPF_PROG(ringzero_ptrace_access_check, struct task_struct *child, unsigned i
 SEC("lsm/task_kill")
 int BPF_PROG(ringzero_task_kill, struct task_struct *target, struct kernel_siginfo *info, int sig, const struct cred *cred) {
     struct config *cfg = get_config();
-    if (!cfg || !cfg->enabled || !cfg->enforce_blocks)
+    if (!cfg || !cfg->enabled)
         return 0;
 
     u32 target_pid = BPF_CORE_READ(target, tgid);
     u32 caller_pid = bpf_get_current_pid_tgid() >> 32;
+
+    // TAMPER PROTECTION. No process may signal the daemon — root included —
+    // except the daemon itself and pid 1. pid 1 is systemd: it delivers
+    // reload, shutdown and the operator's stop, and the unit decides which of
+    // those are allowed. Signal 0 is an existence check and stays allowed.
+    // Every refusal is reported.
+    if (cfg->tamper_protect && sig != 0 && is_daemon_pid(target_pid)
+        && caller_pid != target_pid && caller_pid != 1) {
+        struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+        if (e) {
+            e->type = EVENT_PROCESS_EXEC;
+            e->blocked = 1;
+            fill_process_info(e);
+            __builtin_memset(e->path, 0, MAX_PATH_LEN);
+            const char m[] = "TAMPER:daemon_signal_refused";
+            __builtin_memcpy(e->path, m, sizeof(m));
+            e->remote_port = (u16)sig;
+            bpf_ringbuf_submit(e, 0);
+        }
+        return -EACCES;
+    }
+
+    if (!cfg->enforce_blocks)
+        return 0;
 
     // Self-tamper protection (T1562 Impair Defenses): the security daemon itself
     // must not be killable by an unauthorized process — an attacker killing the
@@ -2113,6 +2165,39 @@ int BPF_PROG(ringzero_task_kill, struct task_struct *target, struct kernel_sigin
     }
 
     return 0; // observe-only: was -EACCES
+}
+
+// LSM: bpf — TAMPER PROTECTION for Ring Zero itself.
+//
+// Every way to detach a Ring Zero program or rewrite one of its maps goes
+// through the bpf() syscall. No agent process tree has a reason to make that
+// call, so with tamper protection on, an agent-tree process — root or not — is
+// refused it entirely. The daemon is not an agent and is unaffected, and so is
+// a human's root shell outside any agent.
+SEC("lsm/bpf")
+int BPF_PROG(ringzero_bpf_syscall, int cmd) {
+    struct config *cfg = get_config();
+    if (!cfg || !cfg->enabled || !cfg->tamper_protect)
+        return 0;
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    if (is_daemon_pid(pid))
+        return 0;
+    char comm[MAX_COMM_LEN] = {};
+    bpf_get_current_comm(comm, sizeof(comm));
+    if (!is_ai_agent(comm) && !bpf_map_lookup_elem(&agent_descendants, &pid))
+        return 0;
+    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (e) {
+        e->type = EVENT_PROCESS_EXEC;
+        e->blocked = 1;
+        fill_process_info(e);
+        __builtin_memset(e->path, 0, MAX_PATH_LEN);
+        const char m[] = "TAMPER:agent_bpf_refused";
+        __builtin_memcpy(e->path, m, sizeof(m));
+        e->remote_port = (u16)cmd;
+        bpf_ringbuf_submit(e, 0);
+    }
+    return -EACCES;
 }
 
 // LSM: sb_mount — block mount operations inside contained namespaces.

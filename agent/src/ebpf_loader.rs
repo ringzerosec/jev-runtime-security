@@ -58,7 +58,10 @@ struct Config {
     /// often a normal session taints before enforcing on it. Mirrors
     /// `taint_on_egress` in the C config; struct size unchanged.
     taint_on_egress: u8,
-    _reserved: [u8; 1],
+    /// Tamper protection: the daemon cannot be signalled (except by pid 1) or
+    /// ptraced, and agent process trees cannot use bpf(). Mirrors
+    /// `tamper_protect` in the C config; struct size unchanged.
+    tamper_protect: u8,
 }
 
 /// Mirrors `struct write_verdict` in GPL/bpf/ringzero.bpf.c.
@@ -974,6 +977,17 @@ pub fn apply_command(bpf: &mut Bpf, cmd: &EbpfCommand) {
                 }
             }
         }
+        EbpfCommand::SetTamperProtect(on) => {
+            if let Some(m) = bpf.map_mut("config_map") {
+                if let Ok(mut map) = Array::<_, Config>::try_from(m) {
+                    if let Ok(mut cfg) = map.get(&0, 0) {
+                        cfg.tamper_protect = *on as u8;
+                        let _ = map.set(0, cfg, 0);
+                        info!(enabled = *on, "eBPF: tamper protection set");
+                    }
+                }
+            }
+        }
         EbpfCommand::SetEgressEnforce(on) => {
             if let Some(m) = bpf.map_mut("config_map") {
                 if let Ok(mut map) = Array::<_, Config>::try_from(m) {
@@ -1240,6 +1254,7 @@ pub enum EbpfCommand {
     SetQuarantineEnforce(bool),
     /// Turn egress narrowing on or off at runtime.
     SetEgressEnforce(bool),
+    SetTamperProtect(bool),
     /// Turn the kernel's taint-on-external-egress signal on or off at runtime.
     SetTaintOnEgress(bool),
     /// Add a destination to the egress allowlist for tainted processes.
@@ -1306,6 +1321,7 @@ pub async fn start(
         // Tamper protection (Phase 3)
         ("ringzero_ptrace_access_check", "ptrace_access_check"),
         ("ringzero_task_kill", "task_kill"),
+        ("ringzero_bpf_syscall", "bpf"),
         ("ringzero_sb_mount", "sb_mount"),
         ("ringzero_sb_umount", "sb_umount"),
         // Enhanced containment enforcement (Phase 4)
@@ -1442,7 +1458,9 @@ pub async fn start(
                         // bit, but it changes what every other rule sees, so
                         // it is the operator's choice to turn on.
                         taint_on_egress: 0,
-                        _reserved: [0; 1],
+                        // Set from [daemon] tamper_protection right after
+                        // start (on by default); off until then.
+                        tamper_protect: 0,
                     },
                     0,
                 ) {

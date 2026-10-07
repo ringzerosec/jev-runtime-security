@@ -2459,6 +2459,31 @@ async fn async_main() -> Result<()> {
 
     // ── Egress narrowing on taint ─────────────────────────────────────────
     //
+    // Tamper protection, on by default. Sent as soon as the eBPF subsystem is
+    // up; until then the daemon is as killable as any process.
+    {
+        let handle = Arc::clone(&ebpf_cmd_tx);
+        let on = cfg.daemon.tamper_protection;
+        tokio::spawn(async move {
+            for _ in 0..60 {
+                if let Some(tx) = handle.read().await.clone() {
+                    let _ = tx.send(ebpf_loader::EbpfCommand::SetTamperProtect(on)).await;
+                    if on {
+                        tracing::info!(
+                            "Tamper protection ON: only systemd may signal the daemon, nobody may \
+                             debug it, and agent process trees may not use bpf()"
+                        );
+                    } else {
+                        tracing::warn!("Tamper protection is OFF ([daemon] tamper_protection = false)");
+                    }
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            tracing::warn!("tamper protection: eBPF subsystem never came up; NOT active");
+        });
+    }
+
     // Seed the allowlist and set the enforce flag once the eBPF subsystem is
     // up. Loopback is handled in the kernel inline; the LLM endpoints and the
     // operator's own entries are pushed here. OFF by default: flipping

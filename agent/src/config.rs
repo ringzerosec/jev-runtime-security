@@ -115,6 +115,10 @@ pub struct DaemonSection {
     /// observe | enforce
     pub mode: String,
     pub socket_path: Option<String>,
+    /// Tamper protection (default on): the daemon cannot be killed except by
+    /// systemd or debugged, and agent process trees cannot use bpf(). Turn it
+    /// off for maintenance with `rz tamper disable` (admin password).
+    pub tamper_protection: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,6 +248,7 @@ impl Default for DaemonSection {
             log_level: "info".into(),
             mode: "enforce".into(),
             socket_path: None,
+            tamper_protection: true,
         }
     }
 }
