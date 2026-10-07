@@ -490,6 +490,18 @@ for event in ("PreToolUse", "PostToolUse"):
     })
     changed = True
 
+# Prompts: the prompt guard (secrets pasted into a prompt) needs this event.
+# UserPromptSubmit takes no matcher.
+groups = hooks.setdefault("UserPromptSubmit", [])
+if not isinstance(groups, list):
+    print(f"leaving {path} alone: hooks.UserPromptSubmit is not a list", file=sys.stderr)
+    raise SystemExit(1)
+if not any("rz-hook" in json.dumps(g) for g in groups):
+    groups.append({
+        "hooks": [{"type": "command", "command": "/usr/bin/rz-hook", "timeout": 5}],
+    })
+    changed = True
+
 if not changed:
     raise SystemExit(2)
 
