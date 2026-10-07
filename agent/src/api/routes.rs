@@ -210,6 +210,7 @@ pub fn make_router(state: ApiState) -> Router {
         // Skill scanner — auto-enumerate every agent's skill surface
         .route("/api/v1/skill-scan/auto", post(scan_skills_auto))
         .route("/api/v1/discovery/inventory", get(discovery_inventory))
+        .route("/api/v1/policy/profiles", get(policy_profiles))
         .route(
             "/api/v1/scan/baseline",
             get(get_scan_baseline)
@@ -2121,6 +2122,19 @@ async fn discovery_inventory(State(_state): State<ApiState>) -> impl IntoRespons
         .await
         .unwrap_or_default();
     Json(inv)
+}
+
+/// GET /api/v1/policy/profiles
+/// Every capability profile with what it allowed and what it would have
+/// refused since the daemon started, plus the latest violations.
+async fn policy_profiles(State(_state): State<ApiState>) -> impl IntoResponse {
+    let cfg = crate::config::DaemonConfig::load();
+    Json(serde_json::json!({
+        "stage": "observe",
+        "mode": cfg.daemon.mode,
+        "prompt_guard": cfg.dlp.prompt_guard,
+        "profiles": crate::policy::capability::ENGINE.report(),
+    }))
 }
 
 // ── Skill scanner — auto-enumerate every agent's skill surface ────────────────

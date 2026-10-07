@@ -53,6 +53,8 @@ pub struct DaemonConfig {
     pub stdio_capture: StdioCaptureSection,
     pub egress: EgressSection,
     pub transcript_watch: TranscriptWatchSection,
+    /// What each agent and MCP server may do (policy/capability.rs).
+    pub profiles: Vec<crate::policy::capability::ProfileConfig>,
 }
 
 // ── OSV.dev vulnerability lookups ───────────────────────────────────────────
@@ -201,6 +203,7 @@ impl Default for DaemonConfig {
             stdio_capture: StdioCaptureSection::default(),
             egress: EgressSection::default(),
             transcript_watch: TranscriptWatchSection::default(),
+            profiles: Vec::new(),
         }
     }
 }

@@ -3,6 +3,7 @@
 // policy, per-agent profiles, and user-defined rules.
 
 pub mod acl;
+pub mod capability;
 pub mod file_rule;
 pub mod intent_policy;
 pub mod network;

@@ -542,6 +542,21 @@ async fn async_main() -> Result<()> {
 
     // Spawn skill-install watcher
     let ipc_watcher = Arc::clone(&ipc);
+    // Capability profiles carry host NAMES; connect events carry IPs. Keep the
+    // name -> IP map fresh in the background.
+    if !policy::capability::ENGINE.is_empty() {
+        tracing::info!(
+            profiles = policy::capability::ENGINE.report().len(),
+            "Capability profiles loaded (observe: would-block is recorded, nothing is refused)"
+        );
+        tokio::spawn(async {
+            loop {
+                policy::capability::ENGINE.refresh_dns().await;
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            }
+        });
+    }
+
     let siem_watcher = Arc::clone(&siem);
     let registry_watcher = Arc::clone(&verified_registry);
     let model_armor_cfg = ModelArmorConfig::resolve(&cfg.model_armor);
@@ -879,6 +894,33 @@ async fn async_main() -> Result<()> {
                     pid, process = %ev.process, target = %target,
                     reason, "ACL would-block (observe-only)"
                     );
+                }
+
+                // Capability profiles (observe): is this connection or program
+                // start allowed by its agent's / MCP server's profile?
+                if !policy::capability::ENGINE.is_empty()
+                    && matches!(ev.kind, EventKind::NetworkConnect | EventKind::ProcessExec)
+                    && (is_agent || ebpf_loader::was_agent_pid(pid))
+                {
+                    let anc = policy::capability::ancestry(pid);
+                    let agent_of = |p: u32, cmd: &str| {
+                        let comm = cmd.split_whitespace().next().unwrap_or("").rsplit('/').next().unwrap_or("");
+                        common::agent_detect::detect_agent_for_pid(p, comm).map(str::to_string)
+                    };
+                    let program = ev.target.rsplit('/').next().unwrap_or(&ev.target).to_string();
+                    let shape = match ev.kind {
+                        EventKind::NetworkConnect => policy::capability::parse_target(&ev.target)
+                            .map(|(ip, port)| policy::capability::EventShape::Connect { ip, port, host: None }),
+                        _ => Some(policy::capability::EventShape::Exec { program: &program }),
+                    };
+                    if let Some(shape) = shape {
+                        if let Some(v) = policy::capability::ENGINE.check(shape, pid, &ev.process, &anc, agent_of) {
+                            tracing::info!(pid, profile = %v.profile, rule = %v.rule, detail = %v.detail, "Capability profile would-block (observe)");
+                            if ev.reason.is_none() {
+                                ev.reason = Some(format!("Would block — {}: {}", v.profile, v.detail));
+                            }
+                        }
+                    }
                 }
 
                 // Network policy evaluation
