@@ -525,11 +525,17 @@ fn is_local_url(u: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") || host.ends_with(".localhost")
 }
 
+/// Does an environment variable NAME suggest it holds a credential? Matched on
+/// whole words of the name, so `GITHUB_PAT` and `API_KEY` count but `PATH`,
+/// `KEYBOARD_LAYOUT` and `AUTHOR` do not.
 fn looks_secret_name(k: &str) -> bool {
-    let k = k.to_ascii_lowercase();
-    ["token", "key", "secret", "password", "passwd", "auth", "credential", "pat"]
-        .iter()
-        .any(|w| k.contains(w))
+    const WORDS: &[&str] = &[
+        "token", "key", "apikey", "secret", "password", "passwd", "pwd", "pat",
+        "auth", "credential", "credentials", "bearer", "cookie", "session",
+    ];
+    k.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| WORDS.contains(&w))
 }
 
 /// `pkg@1.2.3` or `pkg==1.2.3` counts as pinned.
@@ -690,6 +696,16 @@ mod tests {
         assert_eq!(redact_arg("0123456789abcdef0123456789abcdef"), "[redacted]");
         assert_eq!(redact_arg("@modelcontextprotocol/server-filesystem"), "@modelcontextprotocol/server-filesystem");
         assert_eq!(redact_arg("--port"), "--port");
+    }
+
+    #[test]
+    fn secret_names_are_whole_words() {
+        for yes in ["GITHUB_TOKEN", "API_KEY", "GITHUB_PAT", "DB_PASSWORD", "x-auth", "OPENAI_APIKEY"] {
+            assert!(looks_secret_name(yes), "{yes}");
+        }
+        for no in ["PATH", "NODE_PATH", "CODEX_CLI_PATH", "KEYBOARD_LAYOUT", "AUTHOR", "MONKEY", "HOME"] {
+            assert!(!looks_secret_name(no), "{no}");
+        }
     }
 
     #[test]

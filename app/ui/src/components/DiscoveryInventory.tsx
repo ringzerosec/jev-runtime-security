@@ -121,6 +121,19 @@ function Section({
   );
 }
 
+/** Variable NAMES passed to an MCP server (never values), collapsed to a count. */
+function EnvKeys({ keys }: { keys: string[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="text-[11px] text-muted-foreground">
+      <button onClick={() => setOpen((o) => !o)} className="hover:text-foreground underline-offset-2 hover:underline">
+        {keys.length} environment variable{keys.length === 1 ? '' : 's'} {open ? '▴' : '▾'}
+      </button>
+      {open && <div className="mt-1 font-mono break-all">{keys.join(', ')}</div>}
+    </div>
+  );
+}
+
 function Mono({ children }: { children: React.ReactNode }) {
   return <span className="font-mono text-[11px] text-muted-foreground break-all">{children}</span>;
 }
@@ -257,9 +270,7 @@ export default function DiscoveryInventory() {
                   </div>
                 </div>
                 <Mono>{m.url ?? m.command}</Mono>
-                {m.env_keys.length > 0 && (
-                  <div className="text-[11px] text-muted-foreground">env: {m.env_keys.join(', ')}</div>
-                )}
+                {m.env_keys.length > 0 && <EnvKeys keys={m.env_keys} />}
               </div>
             ))}
           </Section>

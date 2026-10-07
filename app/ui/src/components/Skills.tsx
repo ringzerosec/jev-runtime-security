@@ -773,7 +773,7 @@ export default function Skills() {
   const agents = result ? [...new Set(result.results.map((r) => r.agent))] : [];
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 max-w-5xl">
       {/* What AI is installed — the inventory */}
       <DiscoveryInventory />
 

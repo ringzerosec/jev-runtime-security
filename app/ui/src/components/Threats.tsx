@@ -71,6 +71,22 @@ function isBenign(target: string): boolean {
   return BENIGN_PATTERNS.some((p) => p.test(target));
 }
 
+const AGENT_LABELS: Record<string, string> = {
+  claude: 'Claude Code',
+  codex: 'Codex CLI',
+  gemini: 'Gemini CLI',
+  cursor: 'Cursor',
+  copilot: 'GitHub Copilot',
+  opencode: 'opencode',
+  windsurf: 'Windsurf',
+};
+function agentLabel(process?: string): string {
+  if (!process) return '';
+  const p = process.toLowerCase();
+  const hit = Object.keys(AGENT_LABELS).find((k) => p === k || p.startsWith(k));
+  return hit ? AGENT_LABELS[hit] : process;
+}
+
 export default function Threats() {
   const { readOnly: threatsReadOnly } = useTokenScope();
   const { events } = useStore();
@@ -134,6 +150,10 @@ export default function Threats() {
 
   const getDescription = (event: Event) => {
     const t = event.target?.toLowerCase() || '';
+    if (t.endsWith(':prompt-secret')) return 'Secret blocked in a prompt';
+    if (t.startsWith('tamper:') || t.includes('tamper:')) return 'Tamper attempt refused';
+    if (/(^|\/)(api-token|daemon\.toml|profiles\.json|file-access-rules\.json|ringzero-daemon\.service)$/.test(t))
+      return "Agent refused Ring Zero's own files";
     if (t.includes('id_rsa') || t.includes('id_ed25519')) return 'SSH private key access attempt';
     if (t.includes('credentials')) return 'Cloud credentials access attempt';
     if (t.includes('.env')) return 'Environment secrets access attempt';
@@ -144,6 +164,16 @@ export default function Threats() {
     if (kind.includes('network')) return 'Outbound network connection flagged';
     if (kind.includes('process')) return 'Suspicious process spawn detected';
     return 'Suspicious file access detected';
+  };
+
+  // The line under a threat's title: who did it, and what it touched, in
+  // words rather than the raw event target.
+  const getSubject = (event: Event) => {
+    const who = agentLabel((event as { process?: string }).process);
+    const t = event.target || '';
+    if (t.endsWith(':prompt-secret')) return `${who} · the secret was masked and the prompt not sent`;
+    if (t.startsWith('TAMPER:') || t.includes('TAMPER:')) return `${who} · ${t.replace(/^.*TAMPER:/, '').replace(/_/g, ' ')}`;
+    return who ? `${who} · ${t}` : t;
   };
 
   const markResolved = (id: string) => {
@@ -326,7 +356,7 @@ export default function Threats() {
 
   // --- List view ---
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 max-w-5xl">
       <div>
         <h2 className="text-lg font-semibold tracking-tight">Threats</h2>
         <div className="flex items-center gap-3">
@@ -386,9 +416,9 @@ export default function Threats() {
                         {severity.toUpperCase()}
                       </Badge>
                     </div>
-                    <code className="text-[11px] text-muted-foreground truncate block">
-                      {event.target}
-                    </code>
+                    <div className="text-[11px] text-muted-foreground truncate">
+                      {getSubject(event)}
+                    </div>
                   </div>
                   <span className="text-[10px] text-muted-foreground/60 shrink-0">
                     {new Date(event.timestamp).toLocaleTimeString([], {

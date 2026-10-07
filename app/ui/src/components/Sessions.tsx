@@ -161,8 +161,25 @@ function stateConfig(state: SessionState) {
         dot: 'bg-muted-foreground',
       };
     case 'TERMINATED':
-      return { label: 'Terminated', color: 'text-red-400', bg: 'bg-red-400/10', dot: 'bg-red-400' };
+      // The agent's session is over. Not an alarm, and not something we did to
+      // it, so it reads as neutral.
+      return { label: 'Ended', color: 'text-muted-foreground', bg: 'bg-muted/40', dot: 'bg-muted-foreground' };
   }
+}
+
+// Product names as people write them, not lowercased agent ids.
+const AGENT_DISPLAY: Record<string, string> = {
+  claude: 'Claude Code',
+  chatgpt: 'ChatGPT',
+  codex: 'Codex CLI',
+  copilot: 'GitHub Copilot',
+  cursor: 'Cursor',
+  gemini: 'Gemini CLI',
+  opencode: 'opencode',
+  windsurf: 'Windsurf',
+};
+function agentDisplay(t: string): string {
+  return AGENT_DISPLAY[t.toLowerCase()] ?? t.charAt(0).toUpperCase() + t.slice(1);
 }
 
 function elapsed(start: string, end: string | null) {
@@ -1209,7 +1226,7 @@ function SessionDetail({
       <div className="bg-card border border-border rounded-xl px-5 py-4 flex items-center gap-3">
         <AgentIcon agent={guessAgent(normalizeAgentType(session.agent_type))} className="w-8 h-8" />
         <div className="flex-1">
-          <p className="font-semibold capitalize">{normalizeAgentType(session.agent_type)} Agent</p>
+          <p className="font-semibold">{agentDisplay(normalizeAgentType(session.agent_type))}</p>
           <p className="text-xs text-muted-foreground">
             {session.actor} · {elapsed(session.start_time, session.end_time)}
           </p>
@@ -1383,7 +1400,7 @@ function AgentGroupedList({
               <AgentIcon agent={guessAgent(group.agentType)} className="w-8 h-8 shrink-0" />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold capitalize">{group.agentType}</span>
+                  <span className="text-sm font-semibold">{agentDisplay(group.agentType)}</span>
                   {group.liveCount > 0 && (
                     <span className="inline-flex items-center gap-1 text-[10px] bg-green-500/10 text-green-600 px-1.5 py-0.5 rounded-full font-semibold">
                       <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
