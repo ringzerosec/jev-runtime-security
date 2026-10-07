@@ -581,6 +581,55 @@ fn expand_tilde(path: &str) -> String {
     path.replacen("~", "/root", 1)
 }
 
+/// Ring Zero's own state, off-limits to every agent process tree.
+///
+/// WHY THIS IS NOT A NORMAL RULE. Policy can only be changed through the
+/// admin-password prompt if nothing else can change it. The API already
+/// refuses writes from agent callers and needs the root-only token, but an
+/// agent in a terminal where the operator recently used sudo can skip the API
+/// entirely: read the token, or edit profiles.json / daemon.toml directly.
+/// The kernel refuses agent-tree access by tree membership, not by uid, so
+/// this holds for a root agent too. Not removable from the app or the CLI.
+///
+/// WHAT IT CANNOT COVER. The binaries are not blocked, because a file block
+/// refuses every open including the open for exec, and agents must still be
+/// able to run `rz` and `rz-hook`. Stopping the service through systemd is
+/// also not covered: systemd, not the agent, delivers the signal.
+const SELF_PROTECTED_DIRS: &[&str] = &[
+    "/etc/ringzero",
+    "/var/lib/ringzero",
+    "/etc/systemd/system/ringzero-daemon.service.d",
+];
+const SELF_PROTECTED_FILES: &[&str] = &[
+    "/etc/systemd/system/ringzero-daemon.service",
+    "/lib/systemd/system/ringzero-daemon.service",
+];
+
+/// Install the self-protection blocks. Idempotent; called at load and again
+/// after anything that clears the directory-block switch.
+fn apply_self_protection(bpf: &mut Bpf) {
+    for f in SELF_PROTECTED_FILES {
+        let p = std::path::Path::new(f);
+        if p.is_file() {
+            block_inode_path(bpf, p);
+        }
+    }
+    let Some(m) = bpf.map_mut("blocked_dir_inodes") else { return };
+    let Ok(mut dir_map) = AyaHashMap::<_, InoKey, u8>::try_from(m) else { return };
+    let mut n = 0;
+    for d in SELF_PROTECTED_DIRS {
+        if let Some(key) = resolve_dir_inode_key(std::path::Path::new(d)) {
+            let _ = dir_map.insert(key, 1u8, 0);
+            n += 1;
+        }
+    }
+    if n > 0 {
+        // The sentinel turns directory blocking on.
+        let _ = dir_map.insert(InoKey { ino: 0, dev: 0, _pad: 0 }, 1u8, 0);
+        info!("Self-protection: {n} Ring Zero directories are off-limits to every agent");
+    }
+}
+
 fn load_file_access_rules(bpf: &mut Bpf) {
     let path = "/etc/ringzero/file-access-rules.json";
     let data = match std::fs::read_to_string(path) {
@@ -1107,6 +1156,9 @@ pub fn apply_command(bpf: &mut Bpf, cmd: &EbpfCommand) {
                     info!("eBPF: cleared blocked directory restrictions");
                 }
             }
+            // Clearing the operator's directory rules must never clear Ring
+            // Zero's own protection along with them.
+            apply_self_protection(bpf);
         }
     }
 }
@@ -1442,6 +1494,7 @@ pub async fn start(
     block_default_files(&mut bpf);
     block_default_inodes(&mut bpf);
     load_file_access_rules(&mut bpf);
+    apply_self_protection(&mut bpf);
 
     // Register daemon PID so tamper protection exempts us
     {
