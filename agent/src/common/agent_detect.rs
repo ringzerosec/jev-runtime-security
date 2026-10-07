@@ -99,6 +99,12 @@ pub fn is_agent_by_binary(pid: u32) -> bool {
             }
         }
     };
+    is_agent_path(&path)
+}
+
+/// True if an executable path is a known agent install location. The path test
+/// behind `is_agent_by_binary`, usable without a live pid (inventory).
+pub fn is_agent_path(path: &str) -> bool {
     let path_lower = path.to_lowercase();
     // Known agent install paths
     path_lower.contains("cursor-agent")

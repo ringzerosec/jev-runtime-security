@@ -209,6 +209,7 @@ pub fn make_router(state: ApiState) -> Router {
         .route("/api/v1/skill-scan", post(scan_skills))
         // Skill scanner — auto-enumerate every agent's skill surface
         .route("/api/v1/skill-scan/auto", post(scan_skills_auto))
+        .route("/api/v1/discovery/inventory", get(discovery_inventory))
         .route(
             "/api/v1/scan/baseline",
             get(get_scan_baseline)
@@ -2106,6 +2107,20 @@ async fn scan_skills(
         overall_risk: overall_risk.to_string(),
     })
     .into_response()
+}
+
+// ── Discovery — what AI is installed on this machine ──────────────────────────
+
+/// GET /api/v1/discovery/inventory
+/// Every AI agent, IDE AI extension, MCP server and local model runtime found
+/// across all users, with whether enforcement covers each agent. Read-only:
+/// discovery reads directory listings and config files and never executes what
+/// it finds; MCP secrets are reported by name only.
+async fn discovery_inventory(State(_state): State<ApiState>) -> impl IntoResponse {
+    let inv = tokio::task::spawn_blocking(crate::scanner::inventory::collect)
+        .await
+        .unwrap_or_default();
+    Json(inv)
 }
 
 // ── Skill scanner — auto-enumerate every agent's skill surface ────────────────

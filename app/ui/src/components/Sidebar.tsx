@@ -39,7 +39,7 @@ export default function Sidebar({ currentPage, onNavigate }: SidebarProps) {
       icon: ShieldAlert,
       badge: blockedCount || undefined,
     },
-    { id: 'skills', label: 'Agent Skills', icon: Package },
+    { id: 'skills', label: 'Discovery', icon: Package },
     { id: 'file-access', label: 'File Access', icon: FileIcon },
     { id: 'enforcement', label: 'Enforcement', icon: Shield },
   ];

@@ -14,6 +14,7 @@ import {
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { cn } from '../lib/utils';
+import DiscoveryInventory from './DiscoveryInventory';
 import {
   Package,
   ShieldCheck,
@@ -773,16 +774,19 @@ export default function Skills() {
 
   return (
     <div className="space-y-6 max-w-4xl">
-      {/* Header + Scan Button */}
-      <div className="flex items-start justify-between">
+      {/* What AI is installed — the inventory */}
+      <DiscoveryInventory />
+
+      {/* What those agents load — the audit */}
+      <div className="flex items-start justify-between border-t pt-6">
         <div>
           <div className="flex items-center gap-2 mb-1">
             <Shield className="h-5 w-5 text-primary" />
-            <h2 className="text-lg font-semibold tracking-tight">Agent Skills Audit</h2>
+            <h2 className="text-lg font-semibold tracking-tight">Skills &amp; instructions audit</h2>
           </div>
           <p className="text-xs text-muted-foreground">
-            Discover every installed AI agent's skills, plugins, rules and MCP configs, and scan
-            them for prompt injection &amp; supply-chain risk.
+            Scan the skills, plugins, rule files and MCP configs those agents load for prompt
+            injection &amp; supply-chain risk.
           </p>
         </div>
         <Button
@@ -796,7 +800,7 @@ export default function Skills() {
           ) : (
             <ScanLine className="h-4 w-4" />
           )}
-          {scanning ? 'Scanning...' : 'Scan All Agent Skills'}
+          {scanning ? 'Scanning...' : 'Scan skills & instructions'}
         </Button>
       </div>
 
