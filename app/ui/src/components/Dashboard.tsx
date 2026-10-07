@@ -318,7 +318,7 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
             size="sm"
             variant="outline"
             className="text-xs h-7 px-3 rounded-full"
-            onClick={() => onNavigate?.('enforcement')}
+            onClick={() => onNavigate?.('policy')}
           >
             Configure
           </Button>

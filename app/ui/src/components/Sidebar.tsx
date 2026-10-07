@@ -3,7 +3,7 @@ import { useStore } from '../store';
 import icon from '../ringzero-icon.svg';
 import logo from '../ringzero-logo.svg';
 import { cn } from '../lib/utils';
-import { LayoutDashboard, ShieldAlert, Users, Package, Shield, FileIcon } from 'lucide-react';
+import { LayoutDashboard, ShieldAlert, Users, Package, Shield } from 'lucide-react';
 import type { Page } from '../App';
 
 interface SidebarProps {
@@ -40,8 +40,7 @@ export default function Sidebar({ currentPage, onNavigate }: SidebarProps) {
       badge: blockedCount || undefined,
     },
     { id: 'skills', label: 'Discovery', icon: Package },
-    { id: 'file-access', label: 'File Access', icon: FileIcon },
-    { id: 'enforcement', label: 'Enforcement', icon: Shield },
+    { id: 'policy', label: 'Policy', icon: Shield },
   ];
 
   return (

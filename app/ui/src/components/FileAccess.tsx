@@ -162,7 +162,7 @@ function RuleState({ rule }: { rule: FileAccessRule }) {
   );
 }
 
-export default function FileAccess() {
+export default function FileAccess({ embedded = false }: { embedded?: boolean } = {}) {
   const [rules, setRules] = useState<FileAccessRule[]>([]);
   // The daemon's copy, as last loaded. A save is the difference between this
   // and what is on screen, because the privileged path adds and removes rules
@@ -422,12 +422,14 @@ export default function FileAccess() {
   return (
     <div className="space-y-6 max-w-5xl">
       {/* Header */}
-      <div>
-        <h1 className="text-lg font-semibold text-foreground">File Access Control</h1>
-        <p className="text-sm text-muted-foreground mt-0.5">
-          Control which files AI agents can access. Rules are enforced at the kernel level via eBPF.
-        </p>
-      </div>
+      {!embedded && (
+        <div>
+          <h1 className="text-lg font-semibold text-foreground">File Access Control</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            Control which files AI agents can access. Rules are enforced at the kernel level via eBPF.
+          </p>
+        </div>
+      )}
 
       {/* Active rules summary */}
       <ReadOnlyNotice command="sudo rz file-access add <path> block" className="mb-3" />

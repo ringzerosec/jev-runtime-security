@@ -13,11 +13,10 @@ import ThreatAlert, { type ThreatData } from './components/ThreatAlert';
 import Sessions from './components/Sessions';
 import Skills from './components/Skills';
 import ProvenanceGraph from './components/ProvenanceGraph';
-import Enforcement from './components/Enforcement';
-import FileAccess from './components/FileAccess';
+import Policy from './components/Policy';
 
 export type Page =
-  'dashboard' | 'sessions' | 'threats' | 'enforcement' | 'file-access' | 'skills' | 'graph';
+  'dashboard' | 'sessions' | 'threats' | 'policy' | 'enforcement' | 'file-access' | 'skills' | 'graph';
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
@@ -189,10 +188,10 @@ export default function App() {
         return <Skills />;
       case 'graph':
         return <ProvenanceGraph />;
+      case 'policy':
       case 'enforcement':
-        return <Enforcement />;
       case 'file-access':
-        return <FileAccess />;
+        return <Policy />;
       default:
         return <Dashboard />;
     }
