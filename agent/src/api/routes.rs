@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -210,7 +210,8 @@ pub fn make_router(state: ApiState) -> Router {
         // Skill scanner — auto-enumerate every agent's skill surface
         .route("/api/v1/skill-scan/auto", post(scan_skills_auto))
         .route("/api/v1/discovery/inventory", get(discovery_inventory))
-        .route("/api/v1/policy/profiles", get(policy_profiles))
+        .route("/api/v1/policy/profiles", get(policy_profiles).put(policy_profile_upsert))
+        .route("/api/v1/policy/profiles/:name", delete(policy_profile_remove))
         .route(
             "/api/v1/scan/baseline",
             get(get_scan_baseline)
@@ -2122,6 +2123,38 @@ async fn discovery_inventory(State(_state): State<ApiState>) -> impl IntoRespons
         .await
         .unwrap_or_default();
     Json(inv)
+}
+
+/// PUT /api/v1/policy/profiles — add or replace one profile (by name).
+/// Full-scope token only (the auth layer refuses mutating calls on the
+/// read-only token); the app reaches this through `rz profile set` under
+/// polkit. Validated before anything is saved; applied live.
+async fn policy_profile_upsert(
+    State(_state): State<ApiState>,
+    Json(p): Json<crate::policy::capability::ProfileConfig>,
+) -> impl IntoResponse {
+    let name = p.name.clone();
+    match crate::policy::capability::ENGINE.upsert(p) {
+        Ok(list) => {
+            tracing::info!(profile = %name, "capability profile saved");
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "profiles": list })))
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "error": e }))),
+    }
+}
+
+/// DELETE /api/v1/policy/profiles/:name
+async fn policy_profile_remove(
+    State(_state): State<ApiState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match crate::policy::capability::ENGINE.remove(&name) {
+        Ok(list) => {
+            tracing::info!(profile = %name, "capability profile removed");
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "profiles": list })))
+        }
+        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "ok": false, "error": e }))),
+    }
 }
 
 /// GET /api/v1/policy/profiles

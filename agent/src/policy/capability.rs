@@ -45,6 +45,21 @@ pub struct ProfileConfig {
     pub allow_spawn: bool,
     /// If non-empty, only these programs (basenames) may be started.
     pub allow_programs: Vec<String>,
+    /// Network rules: watch (record "would block") or enforce (kernel refuses).
+    pub network_mode: Mode,
+    /// Program rules: watch or enforce.
+    pub programs_mode: Mode,
+}
+
+/// Watch records what a rule would have refused; enforce makes the kernel
+/// refuse it. Every rule starts in watch so it can be checked against real
+/// work before it can break anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Watch,
+    Enforce,
 }
 
 impl Default for ProfileConfig {
@@ -56,7 +71,91 @@ impl Default for ProfileConfig {
             allow_hosts: vec!["*".into()],
             allow_spawn: true,
             allow_programs: Vec::new(),
+            network_mode: Mode::Watch,
+            programs_mode: Mode::Watch,
         }
+    }
+}
+
+/// Where profiles edited from the app are kept. When this file exists it is
+/// the complete list; `[[profiles]]` in daemon.toml only seeds it.
+pub const PROFILES_PATH: &str = "/etc/ringzero/profiles.json";
+
+/// Reject a profile that is malformed or would be ambiguous. Called on every
+/// write, so a bad edit never reaches the engine or the kernel.
+pub fn validate(p: &ProfileConfig) -> Result<(), String> {
+    let name_ok = !p.name.trim().is_empty()
+        && p.name.len() <= 64
+        && !p.name.chars().any(|c| c.is_control());
+    if !name_ok {
+        return Err("name must be 1–64 printable characters".into());
+    }
+    match (&p.agent, p.mcp_match.is_empty()) {
+        (Some(a), true) => {
+            if a.is_empty() || a.len() > 32 || !a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                return Err("agent must be an agent id like claude or codex".into());
+            }
+        }
+        (None, false) => {
+            if p.mcp_match.iter().any(|m| m.trim().len() < 3 || m.len() > 256 || m.chars().any(|c| c.is_control())) {
+                return Err("each MCP match string must be 3–256 printable characters".into());
+            }
+        }
+        (Some(_), false) => return Err("a profile is for an agent or an MCP server, not both".into()),
+        (None, true) => return Err("set agent, or mcp_match for an MCP server".into()),
+    }
+    if p.allow_hosts.len() > 256 {
+        return Err("at most 256 allowed hosts".into());
+    }
+    for h in &p.allow_hosts {
+        if !valid_host_entry(h) {
+            return Err(format!("{h:?} is not a host name, *.domain, IP address or IP range"));
+        }
+    }
+    if p.allow_programs.len() > 256 {
+        return Err("at most 256 allowed programs".into());
+    }
+    for prog in &p.allow_programs {
+        if prog.is_empty() || prog.len() > 64 || prog.contains('/') || prog.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return Err(format!("{prog:?} is not a program name (use the name, not a path)"));
+        }
+    }
+    Ok(())
+}
+
+fn valid_host_entry(h: &str) -> bool {
+    if h == "*" || h.parse::<IpAddr>().is_ok() || parse_cidr(h).is_some() {
+        return true;
+    }
+    let name = h.strip_prefix("*.").unwrap_or(h);
+    !name.is_empty()
+        && name.len() <= 253
+        && name.contains('.')
+        && name.split('.').all(|l| {
+            !l.is_empty() && l.len() <= 63 && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+}
+
+/// "10.0.0.0/24" or "fd00::/8" -> (network, prefix length).
+pub fn parse_cidr(s: &str) -> Option<(IpAddr, u8)> {
+    let (net, len) = s.split_once('/')?;
+    let net: IpAddr = net.parse().ok()?;
+    let len: u8 = len.parse().ok()?;
+    let max = if net.is_ipv4() { 32 } else { 128 };
+    (len <= max).then_some((net, len))
+}
+
+fn in_cidr(ip: IpAddr, net: IpAddr, len: u8) -> bool {
+    match (ip, net) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            let mask = if len == 0 { 0 } else { u32::MAX << (32 - len as u32) };
+            (u32::from(a) & mask) == (u32::from(b) & mask)
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => {
+            let mask = if len == 0 { 0 } else { u128::MAX << (128 - len as u32) };
+            (u128::from(a) & mask) == (u128::from(b) & mask)
+        }
+        _ => false,
     }
 }
 
@@ -103,7 +202,31 @@ const RECENT_PER_PROFILE: usize = 20;
 
 /// The daemon's engine, built from `[[profiles]]` at startup.
 pub static ENGINE: once_cell::sync::Lazy<CapabilityEngine> =
-    once_cell::sync::Lazy::new(|| CapabilityEngine::new(crate::config::DaemonConfig::load().profiles));
+    once_cell::sync::Lazy::new(|| CapabilityEngine::new(load_profiles()));
+
+/// profiles.json if present, else daemon.toml's `[[profiles]]`. Entries that
+/// fail validation are skipped with a warning rather than loaded.
+pub fn load_profiles() -> Vec<ProfileConfig> {
+    let from_file: Option<Vec<ProfileConfig>> = std::fs::read_to_string(PROFILES_PATH)
+        .ok()
+        .and_then(|t| match serde_json::from_str(&t) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::error!(path = PROFILES_PATH, err = %e, "profiles file unreadable; falling back to daemon.toml");
+                None
+            }
+        });
+    let all = from_file.unwrap_or_else(|| crate::config::DaemonConfig::load().profiles);
+    all.into_iter()
+        .filter(|p| match validate(p) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(profile = %p.name, err = %e, "skipping invalid profile");
+                false
+            }
+        })
+        .collect()
+}
 const MAX_ANCESTRY: usize = 32;
 
 pub struct CapabilityEngine {
@@ -124,6 +247,42 @@ impl CapabilityEngine {
         }
     }
 
+    /// Current profile list.
+    pub fn profiles(&self) -> Vec<ProfileConfig> {
+        self.profiles.read().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    /// Add or replace (by name) one profile, persist the whole list, apply it
+    /// live. Returns the saved list.
+    pub fn upsert(&self, p: ProfileConfig) -> Result<Vec<ProfileConfig>, String> {
+        validate(&p)?;
+        let mut list = self.profiles();
+        match list.iter_mut().find(|x| x.name == p.name) {
+            Some(slot) => *slot = p,
+            None => list.push(p),
+        }
+        self.replace(list)
+    }
+
+    /// Remove one profile by name. Err if there is no such profile.
+    pub fn remove(&self, name: &str) -> Result<Vec<ProfileConfig>, String> {
+        let mut list = self.profiles();
+        let before = list.len();
+        list.retain(|x| x.name != name);
+        if list.len() == before {
+            return Err(format!("no profile named {name:?}"));
+        }
+        self.replace(list)
+    }
+
+    fn replace(&self, list: Vec<ProfileConfig>) -> Result<Vec<ProfileConfig>, String> {
+        persist(&list)?;
+        if let Ok(mut w) = self.profiles.write() {
+            *w = list.clone();
+        }
+        Ok(list)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.profiles.read().map(|p| p.is_empty()).unwrap_or(true)
     }
@@ -137,7 +296,7 @@ impl CapabilityEngine {
             .map(|ps| {
                 ps.iter()
                     .flat_map(|p| p.allow_hosts.iter().cloned())
-                    .filter(|h| h != "*" && !h.starts_with("*.") && h.parse::<IpAddr>().is_err())
+                    .filter(|h| h != "*" && !h.starts_with("*.") && h.parse::<IpAddr>().is_err() && parse_cidr(h).is_none())
                     .collect()
             })
             .unwrap_or_default();
@@ -233,6 +392,9 @@ impl CapabilityEngine {
             if let Ok(a) = h.parse::<IpAddr>() {
                 return a == ip;
             }
+            if let Some((net, len)) = parse_cidr(h) {
+                return in_cidr(ip, net, len);
+            }
             if let Some(name) = host {
                 if host_matches(h, name) {
                     return true;
@@ -262,6 +424,35 @@ impl CapabilityEngine {
                 ProfileReport { config: c, kind, stats: st, recent: rc }
             })
             .collect()
+    }
+}
+
+/// Write the list atomically (temp file + rename), root-only.
+fn persist(list: &[ProfileConfig]) -> Result<(), String> {
+    use std::io::Write;
+    let path = std::path::Path::new(PROFILES_PATH);
+    let dir = path.parent().ok_or("bad profiles path")?;
+    let tmp = dir.join(".profiles.json.tmp");
+    let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode_0600()
+        .open(&tmp)
+        .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    f.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
+}
+
+trait Mode0600 {
+    fn mode_0600(&mut self) -> &mut Self;
+}
+impl Mode0600 for std::fs::OpenOptions {
+    fn mode_0600(&mut self) -> &mut Self {
+        use std::os::unix::fs::OpenOptionsExt;
+        self.mode(0o600)
     }
 }
 
@@ -452,6 +643,42 @@ mod tests {
         assert_eq!((r.stats.allowed, r.stats.would_block), (1, 1));
         assert_eq!(r.recent.len(), 1);
         assert_eq!(r.kind, "agent");
+    }
+
+    #[test]
+    fn cidr_ranges() {
+        let mut p = claude();
+        p.allow_hosts = vec!["10.0.0.0/24".into(), "fd00::/8".into()];
+        let e = CapabilityEngine::new(vec![p]);
+        let anc = vec![(10, "/home/u/.local/bin/claude".into())];
+        let ok = |ip: &str| e.check(EventShape::Connect { ip: ip.parse().unwrap(), port: 443, host: None }, 10, "claude", &anc, agent_of).is_none();
+        assert!(ok("10.0.0.5"));
+        assert!(ok("10.0.0.255"));
+        assert!(!ok("10.0.1.1"));
+        assert!(ok("fd12::1"));
+        assert!(!ok("2001:db8::1"));
+    }
+
+    #[test]
+    fn validation() {
+        assert!(validate(&claude()).is_ok());
+        assert!(validate(&fs_mcp()).is_ok());
+        let mut p = claude(); p.name = "".into(); assert!(validate(&p).is_err());
+        let mut p = claude(); p.mcp_match = vec!["x-server".into()]; assert!(validate(&p).is_err(), "agent and mcp both set");
+        let mut p = claude(); p.agent = None; assert!(validate(&p).is_err(), "neither set");
+        let mut p = claude(); p.allow_hosts = vec!["not a host".into()]; assert!(validate(&p).is_err());
+        let mut p = claude(); p.allow_hosts = vec!["10.0.0.0/33".into()]; assert!(validate(&p).is_err());
+        let mut p = claude(); p.allow_hosts = vec!["10.0.0.0/8".into(), "*.corp.example".into(), "::1".into()]; assert!(validate(&p).is_ok());
+        let mut p = claude(); p.allow_programs = vec!["/usr/bin/git".into()]; assert!(validate(&p).is_err(), "path, not name");
+        let mut p = claude(); p.agent = Some("bad id!".into()); assert!(validate(&p).is_err());
+    }
+
+    #[test]
+    fn mode_defaults_to_watch_and_round_trips() {
+        let p: ProfileConfig = serde_json::from_str(r#"{"name":"x","agent":"claude"}"#).unwrap();
+        assert_eq!(p.network_mode, Mode::Watch);
+        let p: ProfileConfig = serde_json::from_str(r#"{"name":"x","agent":"claude","network_mode":"enforce"}"#).unwrap();
+        assert_eq!(p.network_mode, Mode::Enforce);
     }
 
     #[test]

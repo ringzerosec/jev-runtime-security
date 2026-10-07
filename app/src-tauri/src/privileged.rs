@@ -131,6 +131,27 @@ pub fn validate(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        // rz profile set --json <one profile object>
+        //
+        // The JSON is checked here only for shape (bounded, one object); the
+        // daemon validates every field before anything is saved, and refuses
+        // the whole profile on any bad field.
+        ["profile", "set", "--json", json] => {
+            if json.len() > 16 * 1024 || json.chars().any(|c| c.is_control() && c != '\n') {
+                return Err("profile JSON is too large or has control characters".into());
+            }
+            match serde_json::from_str::<serde_json::Value>(json) {
+                Ok(v) if v.is_object() => Ok(()),
+                _ => Err("profile must be one JSON object".into()),
+            }
+        }
+        // rz profile remove <name>
+        ["profile", "remove", name] => {
+            if !sane_value(name, 64) {
+                return Err("profile name is empty, too long, or has control characters".into());
+            }
+            Ok(())
+        }
         // rz file-access remove <id>
         ["file-access", "remove", id] => {
             if !sane_token(id, 128) {
@@ -265,6 +286,18 @@ mod tests {
         assert!(v(&["enforcement", "set-default", "block"]).is_ok());
         assert!(v(&["enforcement", "set-category", "credential_access", "alert"]).is_ok());
         assert!(v(&["review", "label", "abc123", "false-positive"]).is_ok());
+    }
+
+    #[test]
+    fn profile_commands() {
+        assert!(v(&["profile", "set", "--json", r#"{"name":"Claude Code","agent":"claude"}"#]).is_ok());
+        assert!(v(&["profile", "set", "--json", "[1,2]"]).is_err(), "must be one object");
+        assert!(v(&["profile", "set", "--json", "not json"]).is_err());
+        assert!(v(&["profile", "set", "--json", &"x".repeat(17 * 1024)]).is_err(), "bounded");
+        assert!(v(&["profile", "set", "{}"]).is_err(), "--json is required");
+        assert!(v(&["profile", "remove", "Claude Code"]).is_ok());
+        assert!(v(&["profile", "remove", "bad\u{7}name"]).is_err());
+        assert!(v(&["profile", "show"]).is_err(), "read-only commands never need root");
     }
 
     /// The allow-list is the whole point: a webview that has been taken over
