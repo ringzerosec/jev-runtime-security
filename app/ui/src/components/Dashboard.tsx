@@ -385,17 +385,17 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
                   <div className="flex items-center gap-3 flex-wrap">
                     {allBlock ? (
                       <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-50 text-red-700 text-xs font-semibold">
-                        All {totalCategories} categories: BLOCK
+                        All {totalCategories} alert categories: record as violation
                       </span>
                     ) : allAlert ? (
                       <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-50 text-amber-700 text-xs font-semibold">
-                        All {totalCategories} categories: ALERT
+                        All {totalCategories} alert categories: flag for review
                       </span>
                     ) : (
                       <>
                         {blockCount > 0 && (
                           <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-50 text-red-700 text-xs font-semibold">
-                            {blockCount} blocked
+                            {blockCount} recorded as violation
                           </span>
                         )}
                         {alertCount > 0 && (

@@ -214,8 +214,8 @@ export default function Policy() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Policy</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          What AI on this machine is allowed to do. Enforced in the operating system, below every
-          agent; changing it needs an administrator password.
+          What AI on this machine is allowed to do. Each section says whether it is enforced or
+          only watched.
         </p>
       </div>
 
@@ -243,7 +243,7 @@ export default function Policy() {
             <div className="text-sm font-semibold">{enforcing ? 'Enforcing' : 'Watching only'}</div>
             <div className="text-xs text-muted-foreground">
               {enforcing
-                ? 'Protected data below is refused by the kernel, for every agent and everything it starts.'
+                ? 'Protected files below are refused by the kernel for every agent and everything it starts. Other sections say if they are enforced.'
                 : 'Everything is recorded; nothing is refused yet.'}
             </div>
           </div>
