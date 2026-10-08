@@ -50,6 +50,8 @@ function makeBrowserInvoke(): InvokeFn {
         ppid: e.ppid,
         parent_process: e.parent_process,
         llm_context: e.llm_context,
+        category: e.category,
+        classified_by: e.classified_by,
       })) as T;
     }
     return data as T;
@@ -172,6 +174,9 @@ interface Event {
   ppid?: number;
   parent_process?: string;
   llm_context?: LlmContext;
+  /** Threat category a classifier put on this event. */
+  category?: string;
+  classified_by?: string;
 }
 
 // ── Enforcement policy (per-category) ──────────────────────────────────────

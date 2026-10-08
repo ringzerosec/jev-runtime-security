@@ -86,8 +86,13 @@ fn is_credential_path(path: &str) -> bool {
 
 const SKILL_CONFIG_FILES: &[&str] = &[
     "CLAUDE.md",
+    "AGENTS.md",
+    "GEMINI.md",
     ".cursorrules",
+    ".windsurfrules",
     "SKILL.md",
+    ".mcp.json",
+    "copilot-instructions.md",
     ".claude/",
     ".cursor/",
 ];
@@ -98,7 +103,28 @@ fn is_skill_config_path(path: &str) -> bool {
 
 // ── Privilege escalation binaries ───────────────────────────────────────────
 
-const PRIV_ESC_BINS: &[&str] = &["sudo", "su", "pkexec", "doas"];
+const PRIV_ESC_BINS: &[&str] = &["sudo", "su", "pkexec", "doas", "run0"];
+
+/// Programs that start work outside the agent's process tree.
+const ESCAPE_BINS: &[&str] = &["systemd-run", "at", "batch", "crontab"];
+
+fn is_escape_exec(process: &str) -> bool {
+    let name = process.rsplit('/').next().unwrap_or(process);
+    let name = name.split_whitespace().next().unwrap_or(name);
+    ESCAPE_BINS.iter().any(|b| name == *b)
+}
+
+/// Credential basenames the kernel refuses by name anywhere (id_rsa, .env...).
+fn is_credential_name(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.starts_with("id_")
+        || name == "credentials"
+        || name.starts_with(".env")
+        || name == ".netrc"
+        || name == ".npmrc"
+        || name == ".pypirc"
+        || name == ".git-credentials"
+}
 
 fn is_privilege_escalation_exec(process: &str) -> bool {
     PRIV_ESC_BINS
@@ -145,61 +171,57 @@ fn has_injection_pattern(text: &str) -> bool {
 
 // ── Main evaluation function ────────────────────────────────────────────────
 
-/// Maps a SecurityEvent to the SkillSpector category it belongs to and returns
-/// the (category_name, action) pair based on enforcement config.
+/// Which threat category a recorded event belongs to, if any.
 ///
-/// Returns `None` if the event does not match any category-specific rule.
-/// This is a **pure** function: it does not mutate anything.
-pub fn evaluate_event(
-    ev: &SecurityEvent,
-    config: &EnforcementSection,
-) -> Option<(String, EnforcementAction)> {
+/// This is the rule-based classifier: a label for triage, never a decision.
+/// What is refused is decided by the kernel controls and the agent hook; this
+/// only names what happened so a person (and later a model) can sort it. The
+/// trained classifiers replace these rules category by category.
+///
+/// Deliberately narrow. Two of the older mappings labelled ordinary activity:
+/// every network connection was "data exfiltration" and an agent reading its
+/// own CLAUDE.md was a "rogue agent". A label that fires on everything is not a
+/// label, so network is labelled only when it was refused, and reading an
+/// instruction file is not labelled at all.
+pub fn classify(ev: &SecurityEvent) -> Option<&'static str> {
     let category = match ev.kind {
-        // ── File access on credential paths → credential_access ─────────
         EventKind::FileOpen | EventKind::FileCreate | EventKind::FileWrite
             if is_credential_path(&ev.target) =>
         {
             "credential_access"
         }
-
-        // ── Writes to skill config files → memory_poisoning ─────────────
-        EventKind::FileWrite | EventKind::FileCreate if is_skill_config_path(&ev.target) => {
+        EventKind::FileOpen | EventKind::FileCreate | EventKind::FileWrite
+            if !ev.allowed && is_credential_name(&ev.target) =>
+        {
+            "credential_access"
+        }
+        EventKind::FileWrite | EventKind::FileCreate | EventKind::FileDelete | EventKind::FileRename
+            if is_skill_config_path(&ev.target) =>
+        {
             "memory_poisoning"
         }
-
-        // ── Reads of skill config files → rogue_agent ───────────────────
-        EventKind::FileOpen if is_skill_config_path(&ev.target) => "rogue_agent",
-
-        // ── Network activity → data_exfiltration ────────────────────────
-        EventKind::NetworkConnect | EventKind::NetworkSend => "data_exfiltration",
-
-        // ── Privilege escalation binaries ────────────────────────────────
-        EventKind::ProcessExec if is_privilege_escalation_exec(&ev.target) => {
-            "privilege_escalation"
-        }
-
-        // ── curl|bash pipe chains → supply_chain ────────────────────────
+        EventKind::FileOpen if !ev.allowed && is_skill_config_path(&ev.target) => "memory_poisoning",
+        EventKind::NetworkConnect | EventKind::NetworkSend if !ev.allowed => "data_exfiltration",
+        EventKind::ProcessExec if is_privilege_escalation_exec(&ev.target) => "privilege_escalation",
+        EventKind::ProcessExec if is_escape_exec(&ev.target) => "rogue_agent",
         EventKind::ProcessExec if is_curl_pipe_exec(&ev.target) => "supply_chain",
-
-        // ── LLM request with injection patterns → prompt_injection ──────
         EventKind::LlmRequest if has_injection_pattern(&ev.target) => "prompt_injection",
-
-        // ── PII detected → data_exfiltration ────────────────────────────
         EventKind::DlpPii => "data_exfiltration",
-
-        // ── MCP tool calls → mcp_tool_poisoning ─────────────────────────
-        EventKind::McpToolCall => "mcp_tool_poisoning",
-
-        // ── Offensive prompt content → harmful_content ──────────────────
         EventKind::OffensivePrompt => "harmful_content",
-
-        // ── Proxy-detected injection → prompt_injection ─────────────────
         EventKind::ProxyDetection => "prompt_injection",
-
-        // No category match
         _ => return None,
     };
+    Some(category)
+}
 
+/// Maps a SecurityEvent to its category and the configured action for it.
+/// Kept for the per-category config and its tests; the label comes from
+/// `classify`.
+pub fn evaluate_event(
+    ev: &SecurityEvent,
+    config: &EnforcementSection,
+) -> Option<(String, EnforcementAction)> {
+    let category = classify(ev)?;
     let action = action_for_category(category, config);
     Some((category.to_string(), action))
 }
@@ -312,5 +334,40 @@ mod tests {
         let ev = test_event(EventKind::FileWrite, "/home/user/project/CLAUDE.md");
         let (cat, _) = evaluate_event(&ev, &cfg).unwrap();
         assert_eq!(cat, "memory_poisoning");
+    }
+
+    #[test]
+    fn ordinary_activity_is_not_labelled() {
+        // An allowed connection and an agent reading its own instructions are
+        // normal; labelling them would bury the real findings.
+        assert_eq!(classify(&test_event(EventKind::NetworkConnect, "160.79.104.10:443")), None);
+        assert_eq!(classify(&test_event(EventKind::FileOpen, "/home/u/p/CLAUDE.md")), None);
+    }
+
+    #[test]
+    fn refused_connection_is_exfiltration() {
+        let mut ev = test_event(EventKind::NetworkConnect, "203.0.113.9:443");
+        ev.allowed = false;
+        assert_eq!(classify(&ev), Some("data_exfiltration"));
+    }
+
+    #[test]
+    fn escape_tools_are_rogue_agent() {
+        assert_eq!(classify(&test_event(EventKind::ProcessExec, "/usr/bin/systemd-run")), Some("rogue_agent"));
+        assert_eq!(classify(&test_event(EventKind::ProcessExec, "crontab")), Some("rogue_agent"));
+        assert_eq!(classify(&test_event(EventKind::ProcessExec, "/usr/bin/attr")), None);
+    }
+
+    #[test]
+    fn refused_credential_name_is_credential_access() {
+        let mut ev = test_event(EventKind::FileOpen, "id_ed25519");
+        ev.allowed = false;
+        assert_eq!(classify(&ev), Some("credential_access"));
+    }
+
+    #[test]
+    fn instruction_file_changes_are_memory_poisoning() {
+        assert_eq!(classify(&test_event(EventKind::FileDelete, "AGENTS.md")), Some("memory_poisoning"));
+        assert_eq!(classify(&test_event(EventKind::FileRename, ".cursorrules")), Some("memory_poisoning"));
     }
 }

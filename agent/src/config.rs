@@ -55,6 +55,35 @@ pub struct DaemonConfig {
     pub transcript_watch: TranscriptWatchSection,
     /// What each agent and MCP server may do (policy/capability.rs).
     pub profiles: Vec<crate::policy::capability::ProfileConfig>,
+    /// Kernel controls on what agent process trees may run and change.
+    pub controls: ControlsSection,
+}
+
+// ── Kernel controls ─────────────────────────────────────────────────────────
+//
+// Each switch is a fixed list the kernel refuses to agent process trees. The
+// lists are not configurable here on purpose: a control is something a person
+// can switch on and understand, not a pattern language. They take effect only
+// when the daemon is enforcing ([daemon] mode = "enforce"), like file rules.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ControlsSection {
+    /// Agents may not run sudo, su, pkexec, doas or run0.
+    pub admin_tools: bool,
+    /// Agents may not hand work to systemd-run, at, batch or crontab, which
+    /// start it outside the agent's process tree and out of sight.
+    pub escape_tools: bool,
+    /// Agents may read, but not change, create, rename or delete, the files
+    /// that instruct agents (CLAUDE.md, AGENTS.md, .cursorrules and similar).
+    /// OFF by default: agents legitimately edit these when asked to.
+    pub instruction_files: bool,
+}
+
+impl Default for ControlsSection {
+    fn default() -> Self {
+        ControlsSection { admin_tools: true, escape_tools: true, instruction_files: false }
+    }
 }
 
 // ── OSV.dev vulnerability lookups ───────────────────────────────────────────
@@ -208,6 +237,7 @@ impl Default for DaemonConfig {
             egress: EgressSection::default(),
             transcript_watch: TranscriptWatchSection::default(),
             profiles: Vec::new(),
+            controls: ControlsSection::default(),
         }
     }
 }
@@ -324,6 +354,15 @@ pub struct SettingsOverlay {
     pub tamper_protection: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_guard: Option<crate::secrets::prompt_guard::PromptGuardMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escape_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_files: Option<bool>,
+    /// Refuse to run files the write scan flagged ([scanner.write_scan] enforce).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quarantine: Option<bool>,
 }
 
 pub fn settings_path() -> PathBuf {
@@ -347,6 +386,18 @@ impl SettingsOverlay {
         if update.prompt_guard.is_some() {
             cur.prompt_guard = update.prompt_guard;
         }
+        if update.admin_tools.is_some() {
+            cur.admin_tools = update.admin_tools;
+        }
+        if update.escape_tools.is_some() {
+            cur.escape_tools = update.escape_tools;
+        }
+        if update.instruction_files.is_some() {
+            cur.instruction_files = update.instruction_files;
+        }
+        if update.quarantine.is_some() {
+            cur.quarantine = update.quarantine;
+        }
         let path = settings_path();
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&cur)?)?;
@@ -361,6 +412,28 @@ impl SettingsOverlay {
         if let Some(p) = self.prompt_guard {
             cfg.dlp.prompt_guard = p;
         }
+        if let Some(v) = self.admin_tools {
+            cfg.controls.admin_tools = v;
+        }
+        if let Some(v) = self.escape_tools {
+            cfg.controls.escape_tools = v;
+        }
+        if let Some(v) = self.instruction_files {
+            cfg.controls.instruction_files = v;
+        }
+        if let Some(v) = self.quarantine {
+            cfg.scanner.write_scan.enforce = v;
+        }
+    }
+
+    /// True when the update changes nothing.
+    pub fn is_empty(&self) -> bool {
+        self.tamper_protection.is_none()
+            && self.prompt_guard.is_none()
+            && self.admin_tools.is_none()
+            && self.escape_tools.is_none()
+            && self.instruction_files.is_none()
+            && self.quarantine.is_none()
     }
 }
 

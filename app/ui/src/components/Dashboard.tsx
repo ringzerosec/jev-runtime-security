@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { daemonFetch } from '../lib/daemonApi';
+import { daemonFetch, daemonApi } from '../lib/daemonApi';
 import type { Page } from '../App';
-import { useStore, type EnforcementCategories } from '../store';
+import { useStore } from '../store';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { cn } from '../lib/utils';
@@ -13,19 +13,6 @@ import {
   ShieldCheck,
   ShieldAlert,
   Users,
-  KeyRound,
-  Upload,
-  MessageSquareWarning,
-  Package,
-  Maximize2,
-  FileOutput,
-  BrainCircuit,
-  Wrench,
-  Bot,
-  Eye,
-  Plug,
-  AlertTriangle,
-  ChevronRight,
   Activity,
   Scan,
   Lock,
@@ -66,39 +53,6 @@ type Event = {
   timestamp: string;
 };
 
-// Category icon mapping (matches Enforcement.tsx)
-const CATEGORY_ICONS: Record<keyof EnforcementCategories, typeof KeyRound> = {
-  credential_access: KeyRound,
-  data_exfiltration: Upload,
-  privilege_escalation: ShieldAlert,
-  prompt_injection: MessageSquareWarning,
-  supply_chain: Package,
-  excessive_agency: Maximize2,
-  output_handling: FileOutput,
-  memory_poisoning: BrainCircuit,
-  tool_misuse: Wrench,
-  rogue_agent: Bot,
-  system_prompt_leakage: Eye,
-  mcp_tool_poisoning: Plug,
-  harmful_content: AlertTriangle,
-};
-
-const CATEGORY_LABELS: Record<keyof EnforcementCategories, string> = {
-  credential_access: 'Credential Access',
-  data_exfiltration: 'Data Exfiltration',
-  privilege_escalation: 'Privilege Escalation',
-  prompt_injection: 'Prompt Injection',
-  supply_chain: 'Supply Chain',
-  excessive_agency: 'Excessive Agency',
-  output_handling: 'Output Handling',
-  memory_poisoning: 'Memory Poisoning',
-  tool_misuse: 'Tool Misuse',
-  rogue_agent: 'Rogue Agent',
-  system_prompt_leakage: 'Prompt Leakage',
-  mcp_tool_poisoning: 'MCP Poisoning',
-  harmful_content: 'Harmful Content',
-};
-
 // Noise filters for recent events
 const NOISE_TARGETS = [
   /etilqs_/,
@@ -133,9 +87,30 @@ function elapsed(start: string, end: string | null) {
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 
+interface PolicyPosture {
+  mode: string;
+  prompt_guard?: string;
+  controls?: {
+    admin_tools: boolean;
+    escape_tools: boolean;
+    instruction_files: boolean;
+    quarantine: boolean;
+  };
+}
+
 export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) => void }) {
-  const { events, daemonConnected, status, fetchStatus, skills, enforcement, fetchEnforcement } =
-    useStore();
+  const { events, daemonConnected, status, fetchStatus, skills } = useStore();
+  // What the kernel is set to refuse, from the same endpoint Policy reads.
+  const [posture, setPosture] = useState<PolicyPosture | null>(null);
+  useEffect(() => {
+    const load = () =>
+      daemonApi<PolicyPosture>('GET', '/api/v1/policy/profiles')
+        .then(setPosture)
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 10000);
+    return () => clearInterval(t);
+  }, []);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [daemonHint, setDaemonHint] = useState<string | null>(null);
   const retryRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -153,11 +128,6 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
       if (retryRef.current) clearInterval(retryRef.current);
     };
   }, [daemonConnected, fetchStatus]);
-
-  // Fetch enforcement on mount
-  useEffect(() => {
-    fetchEnforcement();
-  }, [fetchEnforcement]);
 
   const handleStartDaemon = async () => {
     setDaemonHint(null);
@@ -198,15 +168,6 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
   );
   const threatsDetected = events.filter((e) => !e.allowed).length;
 
-  // Enforcement-derived
-  const cats = enforcement?.categories;
-  // Categories set to alert/block are ADVISORY labels applied to the trace.
-  // They are counted here as what they are, and deliberately not used to
-  // decide the protection status below.
-  const protectionRulesCount = cats
-    ? (Object.values(cats) as string[]).filter((v) => v === 'alert' || v === 'block').length
-    : 0;
-
   // PROTECTION STATUS MUST REFLECT THE KERNEL, NOT A CONFIG FILE.
   //
   // This used to read "Protected — kernel-level enforcement is active" whenever
@@ -229,11 +190,19 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
       ? 'monitoring'
       : 'unprotected';
 
-  // Categories not set to observe (active protection)
-  const activeCategories = cats
-    ? (Object.entries(cats) as [keyof EnforcementCategories, string][]).filter(
-        ([, v]) => v !== 'observe',
-      )
+  // The controls the kernel is refusing right now. Only counted when the
+  // daemon is enforcing; in watch mode nothing is refused.
+  const enforcing = posture?.mode === 'enforce';
+  const pc = posture?.controls;
+  const activeControls = enforcing && pc
+    ? [
+        'Protected data',
+        pc.admin_tools && 'Admin tools',
+        pc.escape_tools && 'Work outside the agent',
+        pc.instruction_files && 'Changes to agent instructions',
+        pc.quarantine && 'Flagged files',
+        posture?.prompt_guard === 'block' && 'Secrets in prompts',
+      ].filter((x): x is string => Boolean(x))
     : [];
 
   // Recent security events (filtered, last 10)
@@ -294,8 +263,8 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
           icon={Scan}
         />
         <StatCard
-          label="Categories Flagged"
-          value={protectionRulesCount}
+          label="Controls Blocking"
+          value={activeControls.length}
           accent="text-blue-600"
           icon={Lock}
         />
@@ -364,7 +333,9 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
               </p>
               <p className="text-xs text-muted-foreground">
                 {protectionStatus === 'protected'
-                  ? 'Kernel file rules are being enforced. Exec, network and process activity is recorded, not refused.'
+                  ? enforcing
+                    ? 'Agents are refused what the controls below cover. Other activity is recorded.'
+                    : 'This machine is only watching. Agent activity is recorded; nothing is refused.'
                   : protectionStatus === 'monitoring'
                     ? 'Daemon is running and observing agent activity'
                     : 'Start the daemon to begin monitoring'}
@@ -372,50 +343,25 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
             </div>
           </div>
 
-          {/* Active enforcement summary */}
-          {activeCategories.length > 0 ? (
-            <div className="space-y-2">
-              {(() => {
-                const blockCount = activeCategories.filter(([, a]) => a === 'block').length;
-                const alertCount = activeCategories.filter(([, a]) => a === 'alert').length;
-                const totalCategories = cats ? Object.keys(cats).length : 0;
-                const allBlock = blockCount === totalCategories;
-                const allAlert = alertCount === totalCategories;
-                return (
-                  <div className="flex items-center gap-3 flex-wrap">
-                    {allBlock ? (
-                      <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-50 text-red-700 text-xs font-semibold">
-                        All {totalCategories} alert categories: record as violation
-                      </span>
-                    ) : allAlert ? (
-                      <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-50 text-amber-700 text-xs font-semibold">
-                        All {totalCategories} alert categories: flag for review
-                      </span>
-                    ) : (
-                      <>
-                        {blockCount > 0 && (
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-50 text-red-700 text-xs font-semibold">
-                            {blockCount} recorded as violation
-                          </span>
-                        )}
-                        {alertCount > 0 && (
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-50 text-amber-700 text-xs font-semibold">
-                            {alertCount} alerting
-                          </span>
-                        )}
-                        <span className="text-[11px] text-muted-foreground">
-                          {totalCategories - blockCount - alertCount} observing
-                        </span>
-                      </>
-                    )}
-                  </div>
-                );
-              })()}
+          {/* What is being refused */}
+          {activeControls.length > 0 ? (
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] text-muted-foreground">Blocking:</span>
+              {activeControls.map((name) => (
+                <span
+                  key={name}
+                  className="inline-flex items-center px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-700 text-xs font-medium"
+                >
+                  {name}
+                </span>
+              ))}
             </div>
           ) : (
-            <p className="text-xs text-muted-foreground">
-              All categories set to observe. Configure enforcement to enable alerts or blocking.
-            </p>
+            protectionStatus === 'protected' && (
+              <p className="text-xs text-muted-foreground">
+                No controls are blocking. Turn them on in Policy.
+              </p>
+            )
           )}
         </div>
       </div>

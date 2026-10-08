@@ -176,6 +176,28 @@ struct {
     __type(value, u8);
 } blocked_processes SEC(".maps");
 
+// Programs an agent process tree may not run, by executable basename (the
+// dentry of the file actually executed, so a symlink such as run0 resolves to
+// its target). Value: which control put it there (1 admin tools, 2 escape
+// tools). Empty means the controls are off. Refused only when enforce_blocks.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_COMM_LEN]);
+    __type(value, u8);
+} agent_denied_programs SEC(".maps");
+
+// Files an agent process tree may READ but not change: open for write,
+// create, rename onto or away from, delete, or hardlink. Keyed by basename,
+// like blocked_files. These are the files that instruct agents, so changing
+// one changes what every later session is told to do.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_PATH_LEN]);
+    __type(value, u8);
+} agent_readonly_names SEC(".maps");
+
 // Blocked network destinations (IP:port)
 // Key: IP address (network byte order)
 // Value: 1 = blocked
@@ -822,6 +844,15 @@ static __always_inline int is_dentry_protected(struct dentry *dentry) {
     return 0;
 }
 
+// Is this dentry's basename one agents may read but not change?
+static __always_inline int is_readonly_name(struct dentry *dentry) {
+    if (!dentry)
+        return 0;
+    char name[MAX_PATH_LEN] = {};
+    bpf_probe_read_kernel_str(name, MAX_PATH_LEN, BPF_CORE_READ(dentry, d_name.name));
+    return bpf_map_lookup_elem(&agent_readonly_names, name) != 0;
+}
+
 // Check if filename is sensitive (worth reporting)
 static __always_inline int is_sensitive_file(const char *filename) {
     // Check for sensitive filenames
@@ -1050,6 +1081,16 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
         return 0;
     }
 
+    // Agent instruction files: readable, never writable by an agent tree.
+    if (cfg->enforce_blocks) {
+        unsigned int ro_mode = BPF_CORE_READ(file, f_mode);
+        if ((ro_mode & RZ_FMODE_WRITE) && bpf_map_lookup_elem(&agent_readonly_names, e->path)) {
+            e->blocked = 1;
+            bpf_ringbuf_submit(e, 0);
+            return -EACCES;
+        }
+    }
+
     // Check if file is blocked — by basename (broad net) OR by identity (dev+ino).
     // The identity check defeats rename/hardlink: the basename in e->path may be
     // innocuous ("/tmp/x") while the underlying inode is a registered secret.
@@ -1210,8 +1251,9 @@ int BPF_PROG(ringzero_inode_create, struct inode *dir, struct dentry *dentry, um
     if (!is_monitored_current(comm))
         return 0;
 
-    // Block agent creating files in protected directories or with protected names
-    if (cfg->enforce_blocks && dentry && is_dentry_protected(dentry)) {
+    // Block agent creating files in protected directories or with protected
+    // names, or creating an agent instruction file.
+    if (cfg->enforce_blocks && dentry && (is_dentry_protected(dentry) || is_readonly_name(dentry))) {
         struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
         if (e) {
             e->type = EVENT_FILE_CREATE;
@@ -1247,8 +1289,9 @@ int BPF_PROG(ringzero_inode_unlink, struct inode *dir, struct dentry *dentry) {
     if (!is_monitored_current(comm))
         return 0;
 
-    // Block agent deleting protected files or files in protected directories
-    if (cfg->enforce_blocks && dentry && is_dentry_protected(dentry)) {
+    // Block agent deleting protected files, files in protected directories,
+    // or agent instruction files.
+    if (cfg->enforce_blocks && dentry && (is_dentry_protected(dentry) || is_readonly_name(dentry))) {
         struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
         if (e) {
             e->type = EVENT_FILE_DELETE;
@@ -1287,8 +1330,8 @@ int BPF_PROG(ringzero_inode_rename, struct inode *old_dir, struct dentry *old_de
         return 0;
 
     // Block if EITHER source or destination is protected
-    int src_protected = old_dentry && is_dentry_protected(old_dentry);
-    int dst_protected = new_dentry && is_dentry_protected(new_dentry);
+    int src_protected = old_dentry && (is_dentry_protected(old_dentry) || is_readonly_name(old_dentry));
+    int dst_protected = new_dentry && (is_dentry_protected(new_dentry) || is_readonly_name(new_dentry));
 
     if (src_protected || dst_protected) {
         struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -1334,7 +1377,8 @@ int BPF_PROG(ringzero_inode_link, struct dentry *old_dentry, struct inode *dir,
     if (!is_monitored_current(comm))
         return 0;
 
-    if (old_dentry && is_dentry_protected(old_dentry)) {
+    if ((old_dentry && is_dentry_protected(old_dentry))
+        || (new_dentry && is_readonly_name(new_dentry))) {
         struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
         if (e) {
             e->type = EVENT_FILE_CREATE; // a hardlink creates a new name
@@ -1425,6 +1469,22 @@ int BPF_PROG(ringzero_bprm_check, struct linux_binprm *bprm) {
         int agent_lineage = bpf_map_lookup_elem(&agent_descendants, &self_pid) != 0
                          || is_ai_agent(parent_comm)
                          || is_agent_child();
+        // Kernel controls: programs an agent tree may not run at all (admin
+        // tools, escape tools). Decided by list membership only; the list is
+        // filled by the daemon from the operator's switches.
+        if (cfg->enforce_blocks && agent_lineage
+            && bpf_map_lookup_elem(&agent_denied_programs, exec_name)) {
+            struct event *de = bpf_ringbuf_reserve(&events, sizeof(*de), 0);
+            if (de) {
+                de->type = EVENT_PROCESS_EXEC;
+                de->blocked = 1;
+                fill_process_info(de);
+                __builtin_memset(de->path, 0, MAX_PATH_LEN);
+                __builtin_memcpy(de->path, exec_name, MAX_COMM_LEN);
+                bpf_ringbuf_submit(de, 0);
+            }
+            return -EACCES;
+        }
         if (cfg->enforce_blocks && agent_lineage && is_launder_tool(exec_name)) {
             struct event *le = bpf_ringbuf_reserve(&events, sizeof(*le), 0);
             if (le) {
@@ -2027,9 +2087,21 @@ int BPF_PROG(ringzero_ptrace_access_check, struct task_struct *child, unsigned i
     // TAMPER PROTECTION. Nobody attaches a debugger to the daemon or reads or
     // writes its memory (ptrace, process_vm_readv/writev and /proc/<pid>/mem
     // all pass through this check). Root included.
+    //
+    // READ-mode checks (PTRACE_MODE_READ, 0x1, without ATTACH) are what the
+    // kernel asks for when something reads process metadata: the exe link,
+    // open fds, environ. systemd-journald does this for every line the daemon
+    // logs, so refusing it to everyone made each log line a false tamper
+    // event. Debugging and memory access always need ATTACH (0x2) and stay
+    // refused to everyone; READ stays refused to agent trees.
     if (cfg->tamper_protect && is_daemon_pid(target_pid)) {
         u32 tcaller = bpf_get_current_pid_tgid() >> 32;
-        if (tcaller != target_pid) {
+        char tcomm[MAX_COMM_LEN] = {};
+        bpf_get_current_comm(tcomm, sizeof(tcomm));
+        int attach = (mode & 0x2) != 0;
+        int agent_caller = is_ai_agent(tcomm)
+                        || bpf_map_lookup_elem(&agent_descendants, &tcaller) != 0;
+        if (tcaller != target_pid && (attach || agent_caller)) {
             struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
             if (e) {
                 e->type = EVENT_PROCESS_EXEC;

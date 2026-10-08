@@ -543,7 +543,21 @@ async fn get_events(
             } else {
                 events
             };
-            Json(filtered).into_response()
+            // Each event carries the label the classifier gave it, if any.
+            // The rules classify today; the trained classifiers take over per
+            // category, and `classified_by` says which one answered.
+            let labelled: Vec<serde_json::Value> = filtered
+                .iter()
+                .map(|e| {
+                    let mut v = serde_json::to_value(e).unwrap_or_default();
+                    if let (Some(obj), Some(cat)) = (v.as_object_mut(), crate::enforcement::classify(e)) {
+                        obj.insert("category".into(), serde_json::json!(cat));
+                        obj.insert("classified_by".into(), serde_json::json!("rules"));
+                    }
+                    v
+                })
+                .collect();
+            Json(labelled).into_response()
         }
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2145,7 +2159,9 @@ async fn policy_profile_upsert(
 }
 
 /// PUT /api/v1/policy/settings — flip a product-security switch.
-/// Body: {"tamper_protection": bool} and/or {"prompt_guard": "off|warn|block"}.
+/// Body: any of {"tamper_protection": bool, "prompt_guard": "off|warn|block",
+/// "admin_tools": bool, "escape_tools": bool, "instruction_files": bool,
+/// "quarantine": bool}.
 /// Full-scope token only, and refused from agent callers by the auth layer;
 /// the app reaches this through `rz settings set` under polkit, so the
 /// administrator password is asked every time. Saved to settings.json and
@@ -2154,7 +2170,7 @@ async fn policy_settings_set(
     State(_state): State<ApiState>,
     Json(update): Json<crate::config::SettingsOverlay>,
 ) -> impl IntoResponse {
-    if update.tamper_protection.is_none() && update.prompt_guard.is_none() {
+    if update.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok": false, "error": "nothing to change"})));
     }
     match crate::config::SettingsOverlay::save_merged(&update) {
@@ -2167,6 +2183,19 @@ async fn policy_settings_set(
             }
             if let Some(pg) = update.prompt_guard {
                 tracing::info!(?pg, "Prompt guard changed by an administrator");
+            }
+            if update.admin_tools.is_some() || update.escape_tools.is_some() || update.instruction_files.is_some() {
+                let controls = crate::config::DaemonConfig::load().controls;
+                if let Some(tx) = crate::ebpf_loader::CMD_TX.get() {
+                    let _ = tx.send(crate::ebpf_loader::EbpfCommand::SetControls(controls.clone())).await;
+                }
+                tracing::warn!(?controls, "Kernel controls changed by an administrator");
+            }
+            if let Some(on) = update.quarantine {
+                if let Some(tx) = crate::ebpf_loader::CMD_TX.get() {
+                    let _ = tx.send(crate::ebpf_loader::EbpfCommand::SetQuarantineEnforce(on)).await;
+                }
+                tracing::warn!(on, "Quarantine of flagged agent-written files changed by an administrator");
             }
             let _ = _state.audit.append(
                 crate::audit::AuditEntryType::PolicyChange,
@@ -2202,6 +2231,18 @@ async fn policy_profiles(State(_state): State<ApiState>) -> impl IntoResponse {
         "mode": cfg.daemon.mode,
         "tamper_protection": cfg.daemon.tamper_protection,
         "prompt_guard": cfg.dlp.prompt_guard,
+        "controls": {
+            "admin_tools": cfg.controls.admin_tools,
+            "escape_tools": cfg.controls.escape_tools,
+            "instruction_files": cfg.controls.instruction_files,
+            "quarantine": cfg.scanner.write_scan.enforce,
+            "write_scan": cfg.scanner.write_scan.enabled,
+            "lists": {
+                "admin_tools": crate::ebpf_loader::ADMIN_TOOLS,
+                "escape_tools": crate::ebpf_loader::ESCAPE_TOOLS,
+                "instruction_files": crate::ebpf_loader::INSTRUCTION_FILES,
+            },
+        },
         "profiles": crate::policy::capability::ENGINE.report(),
     }))
 }

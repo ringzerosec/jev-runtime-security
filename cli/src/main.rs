@@ -900,7 +900,8 @@ enum EnforcementCommands {
 
 #[derive(Subcommand)]
 enum SettingsCommands {
-    /// rz settings set tamper_protection on|off   |   rz settings set prompt_guard off|warn|block
+    /// rz settings set tamper_protection|admin_tools|escape_tools|instruction_files|quarantine on|off
+    /// rz settings set prompt_guard off|warn|block
     Set { key: String, value: String },
 }
 
@@ -2322,7 +2323,13 @@ async fn cmd_settings_set(api: &str, key: &str, value: &str) -> Result<()> {
         ("tamper_protection", "on") => serde_json::json!({"tamper_protection": true}),
         ("tamper_protection", "off") => serde_json::json!({"tamper_protection": false}),
         ("prompt_guard", v @ ("off" | "warn" | "block")) => serde_json::json!({"prompt_guard": v}),
-        _ => anyhow::bail!("use: tamper_protection on|off, or prompt_guard off|warn|block"),
+        (k @ ("admin_tools" | "escape_tools" | "instruction_files" | "quarantine"), v @ ("on" | "off")) => {
+            serde_json::json!({ (k): v == "on" })
+        }
+        _ => anyhow::bail!(
+            "use: tamper_protection|admin_tools|escape_tools|instruction_files|quarantine on|off, \
+             or prompt_guard off|warn|block"
+        ),
     };
     let v = put_json(&format!("{api}/api/v1/policy/settings"), body).await?;
     if v["ok"].as_bool() == Some(true) {

@@ -5,6 +5,7 @@ import { useStore } from '../store';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { cn } from '../lib/utils';
+import { threatCategoryLabel } from '../lib/threatCategories';
 import {
   ShieldCheck,
   Lock,
@@ -31,6 +32,8 @@ type Event = {
   allowed: boolean;
   reason?: string;
   timestamp: string;
+  category?: string;
+  classified_by?: string;
 };
 
 // Benign file patterns that should not appear as threats — these are normal
@@ -231,6 +234,17 @@ export default function Threats() {
           </div>
 
           <div className="grid grid-cols-2 gap-4 text-xs mb-4">
+            {e.category && (
+              <div className="col-span-2">
+                <p className="text-muted-foreground mb-0.5">Category</p>
+                <p className="text-foreground">
+                  {threatCategoryLabel(e.category)}
+                  <span className="text-muted-foreground">
+                    {' '}· labelled by {e.classified_by === 'rules' || !e.classified_by ? 'built-in rules' : e.classified_by}
+                  </span>
+                </p>
+              </div>
+            )}
             <div>
               <p className="text-muted-foreground mb-0.5">Target</p>
               <code className="text-foreground font-mono text-[11px] break-all">{e.target}</code>
@@ -415,6 +429,11 @@ export default function Threats() {
                       >
                         {severity.toUpperCase()}
                       </Badge>
+                      {event.category && (
+                        <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground shrink-0">
+                          {threatCategoryLabel(event.category)}
+                        </span>
+                      )}
                     </div>
                     <div className="text-[11px] text-muted-foreground truncate">
                       {getSubject(event)}

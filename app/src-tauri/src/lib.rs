@@ -139,6 +139,12 @@ pub struct DaemonSecurityEvent {
     pub parent_process: Option<String>,
     #[serde(default)]
     pub llm_context: Option<serde_json::Value>,
+    /// Threat category a classifier put on this event, if any.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Which classifier answered ("rules" until a trained one ships).
+    #[serde(default)]
+    pub classified_by: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -181,6 +187,10 @@ pub struct Event {
     pub parent_process: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm_context: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classified_by: Option<String>,
 }
 
 // ── Daemon IPC client (Unix socket) ───────────────────────────────────────────
@@ -346,6 +356,8 @@ fn to_tauri_event(se: DaemonSecurityEvent) -> Event {
         ppid: se.ppid,
         parent_process: se.parent_process,
         llm_context: se.llm_context,
+        category: se.category,
+        classified_by: se.classified_by,
     }
 }
 

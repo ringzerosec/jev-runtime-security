@@ -638,6 +638,69 @@ fn apply_self_protection(bpf: &mut Bpf) {
     }
 }
 
+/// Programs refused to agent trees by the admin-tools control.
+pub const ADMIN_TOOLS: &[&str] = &["sudo", "su", "pkexec", "doas", "run0"];
+/// Programs refused by the escape-tools control: each starts work outside the
+/// agent's process tree, where fork-time tracking cannot follow it.
+pub const ESCAPE_TOOLS: &[&str] = &["systemd-run", "at", "batch", "crontab"];
+/// Files agents may read but not change, by basename.
+pub const INSTRUCTION_FILES: &[&str] = &[
+    "CLAUDE.md",
+    "CLAUDE.local.md",
+    "AGENTS.md",
+    "GEMINI.md",
+    ".cursorrules",
+    ".windsurfrules",
+    "SKILL.md",
+    ".mcp.json",
+    "copilot-instructions.md",
+];
+
+fn comm_key(name: &str) -> [u8; MAX_COMM_LEN] {
+    let mut key = [0u8; MAX_COMM_LEN];
+    let b = name.as_bytes();
+    let n = b.len().min(MAX_COMM_LEN - 1);
+    key[..n].copy_from_slice(&b[..n]);
+    key
+}
+
+/// Fill the control lists from the switches. Idempotent: every entry a switch
+/// owns is inserted when it is on and removed when it is off.
+fn apply_controls(bpf: &mut Bpf, c: &crate::config::ControlsSection) {
+    if let Some(m) = bpf.map_mut("agent_denied_programs") {
+        if let Ok(mut map) = AyaHashMap::<_, [u8; MAX_COMM_LEN], u8>::try_from(m) {
+            for (list, on, tag) in [(ADMIN_TOOLS, c.admin_tools, 1u8), (ESCAPE_TOOLS, c.escape_tools, 2u8)] {
+                for name in list {
+                    let k = comm_key(name);
+                    if on {
+                        let _ = map.insert(k, tag, 0);
+                    } else {
+                        let _ = map.remove(&k);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(m) = bpf.map_mut("agent_readonly_names") {
+        if let Ok(mut map) = AyaHashMap::<_, [u8; MAX_PATH_LEN], u8>::try_from(m) {
+            for name in INSTRUCTION_FILES {
+                let k = make_file_key(name);
+                if c.instruction_files {
+                    let _ = map.insert(k, 1u8, 0);
+                } else {
+                    let _ = map.remove(&k);
+                }
+            }
+        }
+    }
+    info!(
+        admin_tools = c.admin_tools,
+        escape_tools = c.escape_tools,
+        instruction_files = c.instruction_files,
+        "Kernel controls applied to agent process trees"
+    );
+}
+
 fn load_file_access_rules(bpf: &mut Bpf) {
     let path = "/etc/ringzero/file-access-rules.json";
     let data = match std::fs::read_to_string(path) {
@@ -982,6 +1045,7 @@ pub fn apply_command(bpf: &mut Bpf, cmd: &EbpfCommand) {
                 }
             }
         }
+        EbpfCommand::SetControls(c) => apply_controls(bpf, c),
         EbpfCommand::SetTamperProtect(on) => {
             if let Some(m) = bpf.map_mut("config_map") {
                 if let Ok(mut map) = Array::<_, Config>::try_from(m) {
@@ -1260,6 +1324,8 @@ pub enum EbpfCommand {
     /// Turn egress narrowing on or off at runtime.
     SetEgressEnforce(bool),
     SetTamperProtect(bool),
+    /// Re-apply the kernel controls (admin tools, escape tools, instruction files).
+    SetControls(crate::config::ControlsSection),
     /// Turn the kernel's taint-on-external-egress signal on or off at runtime.
     SetTaintOnEgress(bool),
     /// Add a destination to the egress allowlist for tainted processes.
@@ -1518,6 +1584,7 @@ pub async fn start(
     block_default_inodes(&mut bpf);
     load_file_access_rules(&mut bpf);
     apply_self_protection(&mut bpf);
+    apply_controls(&mut bpf, &crate::config::DaemonConfig::load().controls);
 
     // Register daemon PID so tamper protection exempts us
     {

@@ -132,7 +132,12 @@ pub fn validate(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         // rz settings set <tamper_protection on|off | prompt_guard off|warn|block>
-        ["settings", "set", "tamper_protection", "on" | "off"] => Ok(()),
+        [
+            "settings",
+            "set",
+            "tamper_protection" | "admin_tools" | "escape_tools" | "instruction_files" | "quarantine",
+            "on" | "off",
+        ] => Ok(()),
         ["settings", "set", "prompt_guard", "off" | "warn" | "block"] => Ok(()),
         // rz profile set --json <one profile object>
         //
@@ -308,6 +313,10 @@ mod tests {
         assert!(v(&["settings", "set", "tamper_protection", "off"]).is_ok());
         assert!(v(&["settings", "set", "prompt_guard", "block"]).is_ok());
         assert!(v(&["settings", "set", "tamper_protection", "maybe"]).is_err());
+        assert!(v(&["settings", "set", "admin_tools", "off"]).is_ok());
+        assert!(v(&["settings", "set", "instruction_files", "on"]).is_ok());
+        assert!(v(&["settings", "set", "quarantine", "on"]).is_ok());
+        assert!(v(&["settings", "set", "admin_tools", "sudo"]).is_err());
         assert!(v(&["settings", "set", "mode", "observe"]).is_err(), "only the listed switches");
     }
 

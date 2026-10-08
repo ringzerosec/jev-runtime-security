@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Policy.tsx — one place for what AI on this machine is allowed to do.
 //
-// Four questions, top to bottom:
-//   1. How strict is this machine?            (mode)
-//   2. What data is off-limits to every agent? (protected files — kernel-enforced)
-//   3. What may each agent and MCP server do?  (capability profiles — watching)
-//   4. What happens to secrets in prompts?     (prompt guard)
-// The older per-category alert settings sit at the bottom, collapsed, because
-// they record violations rather than refuse anything.
+// Every section is a control: something the kernel or the agent hook refuses.
+//   1. Can anything switch Ring Zero off?        (tamper protection)
+//   2. What data is off-limits to every agent?   (protected files, kernel)
+//   3. What may no agent run or change?          (agent controls, kernel)
+//   4. What may each agent and MCP server do?    (capability profiles, watching)
+//   5. What happens to secrets in prompts?       (prompt guard, agent hook)
+// Threat categories are not settings. They are labels a classifier puts on
+// what happened, shown on Threats.
 
 import { useCallback, useEffect, useState } from 'react';
 import { daemonApi } from '../lib/daemonApi';
@@ -17,20 +18,7 @@ import ProtectedData from './ProtectedData';
 import { runPrivilegedSequence, describeFailure } from '@/lib/privileged';
 import { toast } from './ui/toast';
 import PermissionsPanel from './PermissionsPanel';
-import Enforcement from './Enforcement';
-import {
-  Lock,
-  Eye,
-  Bot,
-  Plug,
-  Globe,
-  Terminal,
-  MessageSquareLock,
-  ChevronDown,
-  ChevronRight,
-  ShieldCheck,
-  AlertTriangle,
-} from 'lucide-react';
+import { Lock, Eye, MessageSquareLock, ShieldBan, LogOut, FileLock2, FileX2 } from 'lucide-react';
 
 interface Violation {
   profile: string;
@@ -56,8 +44,18 @@ interface PolicyState {
   mode: string;
   tamper_protection?: boolean;
   prompt_guard: 'off' | 'warn' | 'block';
+  controls?: Controls;
   profiles: Profile[];
 }
+interface Controls {
+  admin_tools: boolean;
+  escape_tools: boolean;
+  instruction_files: boolean;
+  quarantine: boolean;
+  write_scan: boolean;
+  lists: { admin_tools: string[]; escape_tools: string[]; instruction_files: string[] };
+}
+type SettingKey = 'tamper_protection' | 'prompt_guard' | 'admin_tools' | 'escape_tools' | 'instruction_files' | 'quarantine';
 
 function ToggleSwitch({ on, busy, label, onChange }: { on: boolean; busy?: boolean; label: string; onChange: (v: boolean) => void }) {
   return (
@@ -120,87 +118,56 @@ function SectionTitle({
   );
 }
 
-function Chips({ items, empty, max = 4 }: { items: string[]; empty: string; max?: number }) {
-  const [all, setAll] = useState(false);
-  if (items.length === 0) return <span className="text-muted-foreground">{empty}</span>;
-  const shown = all ? items : items.slice(0, max);
+/** One kernel control: what it refuses, the exact list, and its switch. */
+function ControlRow({
+  icon: Icon,
+  title,
+  text,
+  items,
+  on,
+  enforcing,
+  busy,
+  onChange,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  text: string;
+  items?: string[];
+  on: boolean;
+  enforcing: boolean;
+  busy: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  const status = !on ? 'Off' : enforcing ? 'Blocks' : 'Watching only';
   return (
-    <span className="flex flex-wrap items-center gap-1">
-      {shown.map((it) => (
-        <span key={it} className="rounded-md border bg-muted/40 px-1.5 py-0.5 font-mono text-[11px]">
-          {it}
-        </span>
-      ))}
-      {items.length > max && (
-        <button onClick={() => setAll((a) => !a)} className="text-[11px] text-primary hover:underline">
-          {all ? 'show less' : `+${items.length - max} more`}
-        </button>
-      )}
-    </span>
-  );
-}
-
-function ProfileCard({ p }: { p: Profile }) {
-  const [open, setOpen] = useState(false);
-  const Icon = p.kind === 'agent' ? Bot : Plug;
-  const blocked = p.stats.would_block;
-  const anyHost = p.allow_hosts.includes('*');
-  return (
-    <div className="rounded-xl border bg-card">
-      <div className="px-5 py-4 flex items-start gap-4">
-        <div className="p-2 rounded-lg bg-muted shrink-0">
-          <Icon className="h-4 w-4" />
-        </div>
-        <div className="min-w-0 flex-1 space-y-2.5">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold">{p.name}</span>
-            <span className="text-xs text-muted-foreground">{p.kind === 'agent' ? 'Agent' : 'MCP server'}</span>
-          </div>
-          <div className="grid grid-cols-[88px_1fr] gap-x-3 gap-y-2 text-xs">
-            <span className="flex items-center gap-1.5 text-muted-foreground">
-              <Globe className="h-3.5 w-3.5" /> Network
-            </span>
-            {anyHost ? <span>Any host</span> : <Chips items={p.allow_hosts} empty="No network access" />}
-            <span className="flex items-center gap-1.5 text-muted-foreground">
-              <Terminal className="h-3.5 w-3.5" /> Programs
-            </span>
-            {!p.allow_spawn ? (
-              <span>May not start other programs</span>
-            ) : (
-              <Chips items={p.allow_programs} empty="Any program" max={6} />
+    <div className="flex items-start gap-4 px-5 py-4">
+      <Icon className="h-5 w-5 text-muted-foreground shrink-0 mt-0.5" />
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-semibold flex items-center gap-2">
+          {title}
+          <span
+            className={cn(
+              'rounded-full px-2 py-0.5 text-[10px] font-medium',
+              status === 'Blocks' && 'bg-emerald-500/10 text-emerald-600',
+              status === 'Watching only' && 'bg-amber-500/10 text-amber-600',
+              status === 'Off' && 'bg-muted text-muted-foreground',
             )}
-          </div>
-        </div>
-        <div className="text-right shrink-0 w-28">
-          <div className={cn('text-2xl font-semibold tabular-nums leading-none', blocked ? 'text-amber-500' : 'text-muted-foreground/60')}>
-            {blocked}
-          </div>
-          <div className="text-[11px] text-muted-foreground mt-1">would block</div>
-          <div className="text-[11px] text-muted-foreground tabular-nums">{p.stats.allowed} allowed</div>
-        </div>
-      </div>
-      {p.recent.length > 0 && (
-        <div className="border-t">
-          <button
-            onClick={() => setOpen((o) => !o)}
-            className="w-full px-5 py-2 flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
           >
-            {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-            Latest {p.recent.length} outside this profile
-          </button>
-          {open && (
-            <div className="px-5 pb-3 space-y-1.5">
-              {p.recent.map((v, i) => (
-                <div key={i} className="text-xs flex gap-2">
-                  <span className="text-muted-foreground tabular-nums shrink-0">{new Date(v.at).toLocaleTimeString()}</span>
-                  <span className="font-mono">{v.process}</span>
-                  <span className="text-muted-foreground">{v.detail}</span>
-                </div>
-              ))}
-            </div>
-          )}
+            {status}
+          </span>
         </div>
-      )}
+        <div className="text-xs text-muted-foreground mt-0.5">{text}</div>
+        {items && items.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-2">
+            {items.map((it) => (
+              <span key={it} className="rounded-md border bg-muted/40 px-1.5 py-0.5 font-mono text-[11px]">
+                {it}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      <ToggleSwitch on={on} busy={busy} label={title} onChange={onChange} />
     </div>
   );
 }
@@ -226,7 +193,6 @@ const PROMPT_GUARD_TEXT: Record<string, { label: string; text: string; cls: stri
 export default function Policy() {
   const [state, setState] = useState<PolicyState | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [showCategories, setShowCategories] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -245,7 +211,7 @@ export default function Policy() {
   // One privileged change, asked for and applied immediately — the same
   // password prompt every time, never cached.
   const [applying, setApplying] = useState<string | null>(null);
-  const applySetting = async (key: 'tamper_protection' | 'prompt_guard', value: string) => {
+  const applySetting = async (key: SettingKey, value: string) => {
     setApplying(key);
     try {
       const r = await runPrivilegedSequence([['settings', 'set', key, value]]);
@@ -264,14 +230,17 @@ export default function Policy() {
     ? [
         state.tamper_protection === false && 'Tamper protection is off',
         state.prompt_guard === 'off' && 'Secrets in prompts are not checked',
+        state.controls?.admin_tools === false && 'Agents may run admin tools',
+        state.controls?.escape_tools === false && 'Agents may start work outside their own process',
         state.mode !== 'enforce' && 'This machine is only watching; nothing is refused',
       ].filter(Boolean)
     : [];
 
   const enforcing = state?.mode === 'enforce';
+  const c = state?.controls;
+  const controlsTotal = 4;
+  const controlsOn = c ? [c.admin_tools, c.escape_tools, c.instruction_files, c.quarantine].filter(Boolean).length : 0;
   const pg = PROMPT_GUARD_TEXT[state?.prompt_guard ?? 'warn'];
-  const agents = state?.profiles.filter((p) => p.kind === 'agent') ?? [];
-  const mcps = state?.profiles.filter((p) => p.kind === 'mcp') ?? [];
 
   return (
     <div className="space-y-10 max-w-5xl">
@@ -302,9 +271,9 @@ export default function Policy() {
             value={state.prompt_guard === 'block' ? 'Blocked' : state.prompt_guard === 'warn' ? 'Recorded' : 'Not checked'}
           />
           <Posture
-            ok={null}
-            label="Agent permissions"
-            value={`${state.profiles.length} profile${state.profiles.length === 1 ? '' : 's'} · detect only`}
+            ok={controlsOn === controlsTotal}
+            label="Agent controls"
+            value={`${controlsOn} of ${controlsTotal} on`}
           />
         </div>
       )}
@@ -362,10 +331,69 @@ export default function Policy() {
         <ProtectedData />
       </section>
 
-      {/* 3 — Capability profiles */}
+      {/* 3 — Agent controls */}
       <section>
         <SectionTitle
           n={3}
+          title="Agent controls"
+          question="What may no agent run or change?"
+          right={
+            <Badge variant="outline" className="gap-1 border-emerald-500/30 text-emerald-500">
+              <Lock className="h-3 w-3" /> Enforced by the kernel
+            </Badge>
+          }
+        />
+        <div className="rounded-xl border bg-card divide-y">
+          <ControlRow
+            icon={ShieldBan}
+            title="Agents can't run admin tools"
+            text="Refused to every agent and anything it starts. This includes terminals inside AI editors such as Cursor and Windsurf."
+            items={c?.lists.admin_tools}
+            on={!!c?.admin_tools}
+            enforcing={enforcing}
+            busy={applying === 'admin_tools'}
+            onChange={(v) => applySetting('admin_tools', v ? 'on' : 'off')}
+          />
+          <ControlRow
+            icon={LogOut}
+            title="Agents can't start work outside their own process"
+            text="These start a program that no longer traces back to the agent, so nothing could follow what it does."
+            items={c?.lists.escape_tools}
+            on={!!c?.escape_tools}
+            enforcing={enforcing}
+            busy={applying === 'escape_tools'}
+            onChange={(v) => applySetting('escape_tools', v ? 'on' : 'off')}
+          />
+          <ControlRow
+            icon={FileLock2}
+            title="Agents can't change their own instructions"
+            text="Agents may read these files but not change, create, rename or delete them. Turn this off while you ask an agent to edit one."
+            items={c?.lists.instruction_files}
+            on={!!c?.instruction_files}
+            enforcing={enforcing}
+            busy={applying === 'instruction_files'}
+            onChange={(v) => applySetting('instruction_files', v ? 'on' : 'off')}
+          />
+          <ControlRow
+            icon={FileX2}
+            title="Agents can't run flagged files they wrote"
+            text={
+              c && !c.write_scan
+                ? 'Files agents write are not being scanned on this machine, so nothing is flagged.'
+                : 'Every file an agent writes is scanned when it is saved. If the scan finds something serious, no agent may run or open that file.'
+            }
+            on={!!c?.quarantine}
+            enforcing={enforcing}
+            busy={applying === 'quarantine'}
+            onChange={(v) => applySetting('quarantine', v ? 'on' : 'off')}
+          />
+        </div>
+      </section>
+
+      {/* 3 — Capability profiles */}
+      <section>
+        <SectionTitle
+          n={4}
           title="Agent & tool permissions"
           question="What may each agent and MCP server do?"
           right={
@@ -385,7 +413,7 @@ export default function Policy() {
 
       {/* 4 — Prompts */}
       <section>
-        <SectionTitle n={4} title="Prompts" question="What happens to a secret pasted into a prompt?" />
+        <SectionTitle n={5} title="Prompts" question="What happens to a secret pasted into a prompt?" />
         <div className="rounded-xl border bg-card px-5 py-4 flex items-center gap-4">
           <MessageSquareLock className="h-5 w-5 text-muted-foreground shrink-0" />
           <div className="flex-1">
@@ -414,26 +442,6 @@ export default function Policy() {
         </div>
       </section>
 
-      {/* 5 — Alert categories (collapsed) */}
-      <section>
-        <button
-          onClick={() => setShowCategories((v) => !v)}
-          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-        >
-          {showCategories ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-          Alert categories
-          <span className="text-xs">(record and flag for review; they do not refuse anything)</span>
-        </button>
-        {showCategories && (
-          <div className="mt-4">
-            <div className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">
-              <AlertTriangle className="h-3.5 w-3.5" />
-              Refusals come from Protected data and, once enforced, Agent &amp; tool permissions above.
-            </div>
-            <Enforcement embedded />
-          </div>
-        )}
-      </section>
     </div>
   );
 }
