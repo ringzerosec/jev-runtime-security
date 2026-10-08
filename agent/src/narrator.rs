@@ -739,7 +739,8 @@ mod tests {
         e.llm_context = Some(crate::common::event::LlmContext {
             provider: "claude".into(),
             model: None,
-            response_text: Some("deploy with key sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into()),
+            // Built at run time so the fixture is not a key-shaped string in the source.
+            response_text: Some(format!("deploy with key sk-ant-{}-{}", "api03", "A".repeat(40))),
             tool_call: None,
             usage: None,
             response_ts: chrono::Utc::now(),
