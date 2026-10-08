@@ -250,14 +250,18 @@ pub fn run(args: &[String]) -> Outcome {
         // 127 is also what a caller with nothing to authenticate through gets:
         // no polkit agent and no controlling terminal, which is exactly what a
         // background process looks like. Say that, and keep polkit's own words.
-        127 => Outcome::Unavailable {
-            message: if stderr.is_empty() {
-                "polkit could not authenticate this change (no authentication agent available)"
-                    .to_string()
-            } else {
-                format!("polkit could not authenticate this change: {stderr}")
-            },
-        },
+        127 => {
+            // Keep polkit's own words in the log for support; show the person
+            // what to do instead. The usual cause is an app started outside the
+            // desktop session (for example from a remote shell), which has no
+            // password window to ask through.
+            if !stderr.is_empty() {
+                eprintln!("ringzero-app: pkexec could not authenticate: {stderr}");
+            }
+            Outcome::Unavailable {
+                message: "The password window could not open. Close Ring Zero and open it again from your applications menu.".to_string(),
+            }
+        }
         other => Outcome::Failed {
             code: other,
             stderr: if stderr.is_empty() { stdout } else { stderr },
