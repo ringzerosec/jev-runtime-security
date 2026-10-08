@@ -2481,6 +2481,62 @@ async fn async_main() -> Result<()> {
 
     // ── Egress narrowing on taint ─────────────────────────────────────────
     //
+    // Agents that were already running when the daemon started are not in the
+    // kernel's agent map (it is rebuilt on every start), and nothing re-tags a
+    // process that never forks or execs again. Find them, and everything they
+    // started, and tag them with their profile slot.
+    {
+        let handle = Arc::clone(&ebpf_cmd_tx);
+        tokio::spawn(async move {
+            let tx = loop {
+                if let Some(t) = handle.read().await.clone() {
+                    break t;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            };
+            let mut procs: Vec<(u32, u32, String)> = Vec::new();
+            if let Ok(rd) = std::fs::read_dir("/proc") {
+                for e in rd.flatten() {
+                    let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
+                    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+                    // "pid (comm) state ppid ...": comm may contain spaces, so split after the last ')'.
+                    let ppid = stat.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().nth(1)).and_then(|p| p.parse().ok()).unwrap_or(0);
+                    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default().trim().to_string();
+                    procs.push((pid, ppid, comm));
+                }
+            }
+            let mut tagged: std::collections::HashMap<u32, u8> = std::collections::HashMap::new();
+            for (pid, _, comm) in &procs {
+                if common::agent_detect::is_ai_agent(comm) {
+                    let agent = common::agent_detect::detect_agent_for_pid(*pid, comm).unwrap_or("");
+                    let slot = policy::capability::ENGINE.slot_for_agent(agent).unwrap_or(1);
+                    tagged.insert(*pid, slot);
+                }
+            }
+            // Descendants inherit their agent's slot; repeat until nothing changes.
+            loop {
+                let mut grew = false;
+                for (pid, ppid, _) in &procs {
+                    if !tagged.contains_key(pid) {
+                        if let Some(&slot) = tagged.get(ppid) {
+                            tagged.insert(*pid, slot);
+                            grew = true;
+                        }
+                    }
+                }
+                if !grew {
+                    break;
+                }
+            }
+            for (pid, slot) in &tagged {
+                let _ = tx.send(ebpf_loader::EbpfCommand::TagProfileSlot { pid: *pid, slot: *slot }).await;
+            }
+            if !tagged.is_empty() {
+                tracing::info!(processes = tagged.len(), "Re-tagged agents already running at startup, with everything they started");
+            }
+        });
+    }
+
     // Tamper protection, on by default. Sent as soon as the eBPF subsystem is
     // up; until then the daemon is as killable as any process.
     {

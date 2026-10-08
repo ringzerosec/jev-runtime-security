@@ -719,10 +719,41 @@ static __always_inline int should_monitor_process(const char *comm) {
 // that actually create/delete files, connect out, and exec — whose comm isn't an
 // agent name but whose pid is in agent_descendants. Without it, only the agent's
 // own pid was monitored, so the session showed almost no activity.
+// Is the current process an agent, judged by the PROCESS, not the thread?
+//
+// comm is per thread. Runtimes such as Bun and Node do file I/O on worker
+// threads with their own names ("Bun Pool 0"), so a thread can say nothing
+// about being an agent while its process is one. The process is tagged in
+// agent_descendants when it starts, but an agent that was already running
+// when the daemon (re)started was never tagged, and its worker threads read
+// protected files. Checking the main thread's name closes that: an agent's
+// main thread carries its name, and finding one tags the process on the spot.
+static __always_inline int current_process_is_agent(const char *comm) {
+    u32 tgid = bpf_get_current_pid_tgid() >> 32;
+    if (bpf_map_lookup_elem(&agent_descendants, &tgid))
+        return 1;
+    char lc[MAX_COMM_LEN] = {};
+    if (is_ai_agent(comm)) {
+        __builtin_memcpy(lc, comm, MAX_COMM_LEN);
+    } else {
+        struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+        struct task_struct *leader = BPF_CORE_READ(task, group_leader);
+        if (!leader)
+            return 0;
+        bpf_core_read_str(lc, sizeof(lc), &leader->comm);
+        if (!is_ai_agent(lc))
+            return 0;
+    }
+    u8 slot = 1;
+    u8 *ns = bpf_map_lookup_elem(&agent_profile_by_name, lc);
+    if (ns)
+        slot = *ns;
+    bpf_map_update_elem(&agent_descendants, &tgid, &slot, BPF_NOEXIST);
+    return 1;
+}
+
 static __always_inline int is_monitored_current(const char *comm) {
-    u32 pid = bpf_get_current_pid_tgid() >> 32;
-    return is_ai_agent(comm) || should_monitor_process(comm)
-        || bpf_map_lookup_elem(&agent_descendants, &pid) != 0;
+    return current_process_is_agent(comm) || should_monitor_process(comm);
 }
 
 // Is this dentry inside a blocked directory?
@@ -1013,7 +1044,7 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
     // Monitored if this is an agent process itself OR a PID tainted as an
     // agent descendant (tagged at fork — survives reparenting, O(1) lookup).
     u32 cur_pid = bpf_get_current_pid_tgid() >> 32;
-    int agent = is_ai_agent(comm) || bpf_map_lookup_elem(&agent_descendants, &cur_pid);
+    int agent = current_process_is_agent(comm);
     if (!agent) {
         // Self-healing fallback for trees that predate the daemon (or a restart),
         // where the fork tag was never recorded: language runtimes (node/python/
