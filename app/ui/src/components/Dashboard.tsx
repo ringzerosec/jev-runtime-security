@@ -69,6 +69,11 @@ function isNoiseEvent(e: Event): boolean {
   const proc = e.skill_name || '';
   if (NOISE_PROCESSES.includes(proc.toLowerCase())) return true;
   if (NOISE_TARGETS.some((p) => p.test(target))) return true;
+  // An agent talking to this machine itself (a local model server, its own
+  // helper) is not a security event. Refusals still show.
+  const kind = (e.type || '').toLowerCase();
+  if (e.allowed && (kind.includes('network') || kind.includes('dns')) && /^(127\.|0\.0\.0\.0|\[?::1\]?)/.test(target)) return true;
+  if (e.allowed && kind.includes('dns') && !target) return true;
   return false;
 }
 
