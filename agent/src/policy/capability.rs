@@ -280,7 +280,7 @@ pub fn agent_process_names(agent: &str) -> &'static [&'static str] {
         "cursor" => &["cursor-agent", "agent"],
         "gemini" => &["gemini"],
         "aider" => &["aider"],
-        "opencode" => &["opencode"],
+        "opencode" => &["opencode", "opencode.exe"],
         "windsurf" => &["windsurf"],
         "copilot" => &["copilot"],
         "devin" => &["devin"],

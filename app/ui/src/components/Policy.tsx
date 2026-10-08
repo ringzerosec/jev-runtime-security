@@ -17,7 +17,7 @@ import { cn } from '../lib/utils';
 import ProtectedData from './ProtectedData';
 import { runPrivilegedSequence, describeFailure } from '@/lib/privileged';
 import { toast } from './ui/toast';
-import PermissionsPanel from './PermissionsPanel';
+import PermissionsPanel, { type DiscoveredAgent } from './PermissionsPanel';
 import { Lock, Eye, MessageSquareLock, ShieldBan, LogOut, FileLock2, FileX2 } from 'lucide-react';
 
 interface Violation {
@@ -195,6 +195,17 @@ const PROMPT_GUARD_TEXT: Record<string, { label: string; text: string; cls: stri
 export default function Policy() {
   const [state, setState] = useState<PolicyState | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Every agent Discovery found, so ones without limits are listed too.
+  const [discovered, setDiscovered] = useState<DiscoveredAgent[]>([]);
+  useEffect(() => {
+    daemonApi<{ agents: { id: string; name: string }[] }>('GET', '/api/v1/discovery/inventory')
+      .then((inv) => {
+        const seen = new Set<string>();
+        setDiscovered(inv.agents.filter((a) => !seen.has(a.id) && seen.add(a.id)).map((a) => ({ id: a.id, name: a.name })));
+      })
+      .catch(() => {});
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -413,13 +424,7 @@ export default function Policy() {
             )
           }
         />
-        {state && state.profiles.length === 0 ? (
-          <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-            No agent permissions are set yet.
-          </div>
-        ) : (
-          state && <PermissionsPanel profiles={state.profiles} onSaved={load} />
-        )}
+        {state && <PermissionsPanel profiles={state.profiles} discovered={discovered} onSaved={load} />}
       </section>
 
       {/* 4 — Prompts */}
