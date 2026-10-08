@@ -164,6 +164,12 @@ export default function Threats() {
     if (t.includes('shadow')) return 'Shadow password file access attempt';
     if (t.includes('token') || t.includes('secret')) return 'Secret/token access attempt';
     const kind = event.type?.toLowerCase() || '';
+    if (kind.includes('process') && !event.allowed) {
+      if (event.category === 'privilege_escalation') return 'Agent refused an admin tool';
+      if (event.category === 'rogue_agent') return 'Agent refused work outside its own process';
+    }
+    if (kind.includes('file') && !event.allowed && event.category === 'memory_poisoning')
+      return "Agent refused a change to an agent's instructions";
     if (kind.includes('network')) return 'Outbound network connection flagged';
     if (kind.includes('process')) return 'Suspicious process spawn detected';
     return 'Suspicious file access detected';
