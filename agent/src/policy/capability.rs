@@ -14,12 +14,16 @@
 // it allowed and what it would have refused. This is also how a profile is
 // rolled out for real: watch it against real work first, then enforce.
 //
-// STAGE 2 (not here): the kernel refuses. The network half maps onto the
-// connect hook's existing IP allowlist; the programs half needs a new exec
-// denial, reviewed like every other kernel change.
+// STAGE 2: ENFORCE. A profile whose network_mode or programs_mode is
+// "enforce" is loaded into the kernel (`kernel_state`): every process in the
+// agent's tree carries the profile's slot, and the kernel refuses a program
+// or destination outside the profile at the call itself, so a process that
+// lives for a millisecond is judged like any other. Host names become
+// addresses two ways: they are looked up on a timer, and addresses in the
+// agent's own DNS answers for an approved name are added for the answer's TTL
+// (`learn_dns`), which is what keeps CDN-fronted services working.
 //
-// Nothing here can allow something the kernel denied. It only adds a
-// "would block" observation.
+// Nothing here can allow something the kernel denied.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
@@ -235,11 +239,88 @@ pub struct CapabilityEngine {
     resolved: RwLock<HashMap<String, HashSet<IpAddr>>>,
     stats: RwLock<HashMap<String, ProfileStats>>,
     recent: RwLock<HashMap<String, VecDeque<Violation>>>,
+    /// Addresses seen in agents' DNS answers for an allowed name or *.domain,
+    /// keyed by the profile's host entry, each with its expiry.
+    learned: RwLock<HashMap<String, HashMap<std::net::Ipv4Addr, std::time::Instant>>>,
+    /// Set after the first lookup of every host name. Until then a profile
+    /// that names hosts is not network-enforced, so the seconds after the
+    /// daemon starts cannot cut agents off from approved hosts.
+    names_ready: std::sync::atomic::AtomicBool,
+    /// Concrete names seen in DNS answers for an approved *.domain, kept so
+    /// the timer looks them up too. Persisted, so after the first sighting a
+    /// name's addresses are already loaded when an agent next connects.
+    seen_names: RwLock<HashSet<String>>,
 }
+
+/// Where names learned for *.domain entries are kept across restarts.
+const SEEN_NAMES_PATH: &str = "/var/lib/ringzero/learned-names.json";
+const MAX_SEEN_NAMES: usize = 2048;
+
+/// What the kernel needs to enforce the profiles. Slots start at 2: the
+/// kernel uses 1 for "an agent with no profile".
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KernelProfiles {
+    /// Process name -> slot, for agents the kernel recognises by name.
+    pub names: Vec<(String, u8)>,
+    /// slot -> (programs_enforce, allow_spawn, network_enforce)
+    pub policies: Vec<(u8, bool, bool, bool)>,
+    /// (slot, program basename)
+    pub programs: Vec<(u8, String)>,
+    /// (slot, IPv4 network, prefix length)
+    pub hosts: Vec<(u8, std::net::Ipv4Addr, u8)>,
+}
+
+/// The process names an agent runs under, as the kernel sees them (comm,
+/// 15 characters at most). Agents that run under a runtime's name (node,
+/// python) are tagged by the daemon from their command line instead.
+pub fn agent_process_names(agent: &str) -> &'static [&'static str] {
+    match agent {
+        "claude" => &["claude"],
+        "codex" => &["codex"],
+        "cursor" => &["cursor-agent", "agent"],
+        "gemini" => &["gemini"],
+        "aider" => &["aider"],
+        "opencode" => &["opencode"],
+        "windsurf" => &["windsurf"],
+        "copilot" => &["copilot"],
+        "devin" => &["devin"],
+        _ => &[],
+    }
+}
+
+/// The names a program is really executed under: follow every symlink of
+/// `name` found in the standard program directories. Only names that differ
+/// from `name` are returned.
+pub fn real_program_names(name: &str) -> Vec<String> {
+    const DIRS: &[&str] = &["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"];
+    let mut out = Vec::new();
+    for d in DIRS {
+        let path = std::path::Path::new(d).join(name);
+        if let Ok(real) = std::fs::canonicalize(&path) {
+            if let Some(f) = real.file_name().and_then(|f| f.to_str()) {
+                if f != name && !out.iter().any(|x| x == f) {
+                    out.push(f.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+const MIN_LEARN_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const MAX_LEARN_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 impl CapabilityEngine {
     pub fn new(profiles: Vec<ProfileConfig>) -> Self {
         CapabilityEngine {
+            learned: RwLock::new(HashMap::new()),
+            names_ready: std::sync::atomic::AtomicBool::new(false),
+            seen_names: RwLock::new(
+                std::fs::read_to_string(SEEN_NAMES_PATH)
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<HashSet<String>>(&t).ok())
+                    .unwrap_or_default(),
+            ),
             profiles: RwLock::new(profiles),
             resolved: RwLock::new(HashMap::new()),
             stats: RwLock::new(HashMap::new()),
@@ -301,6 +382,26 @@ impl CapabilityEngine {
             })
             .unwrap_or_default();
         let mut out: HashMap<String, HashSet<IpAddr>> = HashMap::new();
+        // Names learned for *.domain entries, looked up like the rest. Their
+        // addresses are filed under the matching *.domain pattern.
+        let seen: Vec<String> = self.seen_names.read().map(|s| s.iter().cloned().collect()).unwrap_or_default();
+        let wildcards: Vec<String> = self
+            .profiles
+            .read()
+            .map(|ps| ps.iter().flat_map(|p| p.allow_hosts.iter()).filter(|h| h.starts_with("*.")).cloned().collect())
+            .unwrap_or_default();
+        for name in seen {
+            let pats: Vec<&String> = wildcards.iter().filter(|w| host_matches(w, &name)).collect();
+            if pats.is_empty() {
+                continue;
+            }
+            if let Ok(addrs) = tokio::net::lookup_host((name.as_str(), 443)).await {
+                let ips: Vec<IpAddr> = addrs.map(|a| a.ip()).collect();
+                for w in pats {
+                    out.entry(w.clone()).or_default().extend(ips.iter().copied());
+                }
+            }
+        }
         for h in hosts {
             let ips: Vec<IpAddr> = match tokio::net::lookup_host((h.as_str(), 443)).await {
                 Ok(addrs) => addrs.map(|a| a.ip()).collect(),
@@ -311,6 +412,7 @@ impl CapabilityEngine {
         if let Ok(mut r) = self.resolved.write() {
             *r = out;
         }
+        self.names_ready.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Check one event from an agent's process tree. `ancestry` is the
@@ -400,11 +502,169 @@ impl CapabilityEngine {
                     return true;
                 }
             }
-            resolved
-                .as_ref()
-                .and_then(|r| r.get(h))
-                .is_some_and(|ips| ips.contains(&ip))
+            let learned_hit = match ip {
+                IpAddr::V4(a) => self
+                    .learned
+                    .read()
+                    .ok()
+                    .and_then(|l| l.get(h).map(|m| m.contains_key(&a)))
+                    .unwrap_or(false),
+                _ => false,
+            };
+            learned_hit
+                || resolved
+                    .as_ref()
+                    .and_then(|r| r.get(h))
+                    .is_some_and(|ips| ips.contains(&ip))
         })
+    }
+
+    /// The kernel slot for a profile, by its position in the list.
+    fn slot_of(index: usize) -> Option<u8> {
+        u8::try_from(index + 2).ok()
+    }
+
+    /// Slot of the profile for this agent id, if one exists.
+    pub fn slot_for_agent(&self, agent: &str) -> Option<u8> {
+        let ps = self.profiles.read().ok()?;
+        ps.iter().position(|p| p.agent.as_deref() == Some(agent)).and_then(Self::slot_of)
+    }
+
+    /// Slot of the MCP-server profile whose match strings all occur in this
+    /// command line, if any.
+    pub fn mcp_slot_for(&self, cmdline: &str) -> Option<u8> {
+        let ps = self.profiles.read().ok()?;
+        ps.iter()
+            .position(|p| !p.mcp_match.is_empty() && p.mcp_match.iter().all(|m| cmdline.contains(m.as_str())))
+            .and_then(Self::slot_of)
+    }
+
+    /// True when any profile enforces anything, so the daemon knows whether
+    /// keeping addresses fresh matters.
+    pub fn any_enforced(&self) -> bool {
+        self.profiles
+            .read()
+            .map(|ps| ps.iter().any(|p| p.network_mode == Mode::Enforce || p.programs_mode == Mode::Enforce))
+            .unwrap_or(false)
+    }
+
+    /// Everything the kernel needs, computed from the profiles, the looked-up
+    /// addresses and the learned ones.
+    pub fn kernel_state(&self) -> KernelProfiles {
+        let mut out = KernelProfiles::default();
+        let Ok(ps) = self.profiles.read() else { return out };
+        let resolved = self.resolved.read().ok();
+        let learned = self.learned.read().ok();
+        let now = std::time::Instant::now();
+        for (i, p) in ps.iter().enumerate() {
+            let Some(slot) = Self::slot_of(i) else { break };
+            if let Some(agent) = &p.agent {
+                for n in agent_process_names(agent) {
+                    out.names.push((n.to_string(), slot));
+                }
+            }
+            let any_host = p.allow_hosts.iter().any(|h| h == "*");
+            let names_pending = !self.names_ready.load(std::sync::atomic::Ordering::Acquire)
+                && p.allow_hosts.iter().any(|h| h.parse::<IpAddr>().is_err() && parse_cidr(h).is_none());
+            let net_enforce = p.network_mode == Mode::Enforce && !any_host && !names_pending;
+            let prog_limited = !p.allow_spawn || !p.allow_programs.is_empty();
+            let prog_enforce = p.programs_mode == Mode::Enforce && prog_limited;
+            out.policies.push((slot, prog_enforce, p.allow_spawn, net_enforce));
+            if prog_enforce {
+                for prog in &p.allow_programs {
+                    out.programs.push((slot, prog.clone()));
+                    // The kernel sees the file actually executed. python3 is
+                    // usually a link to python3.14 and sh a link to dash, so
+                    // approve the real name too.
+                    for real in real_program_names(prog) {
+                        out.programs.push((slot, real));
+                    }
+                }
+                out.programs.sort();
+                out.programs.dedup();
+            }
+            if net_enforce {
+                for h in &p.allow_hosts {
+                    if let Ok(IpAddr::V4(a)) = h.parse::<IpAddr>() {
+                        out.hosts.push((slot, a, 32));
+                    } else if let Some((IpAddr::V4(n), len)) = parse_cidr(h) {
+                        out.hosts.push((slot, n, len));
+                    } else {
+                        if let Some(ips) = resolved.as_ref().and_then(|r| r.get(h)) {
+                            for ip in ips {
+                                if let IpAddr::V4(a) = ip {
+                                    out.hosts.push((slot, *a, 32));
+                                }
+                            }
+                        }
+                        if let Some(ips) = learned.as_ref().and_then(|l| l.get(h)) {
+                            for (a, exp) in ips {
+                                if *exp > now {
+                                    out.hosts.push((slot, *a, 32));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.hosts.sort();
+        out.hosts.dedup();
+        out
+    }
+
+    /// Admit addresses from a DNS answer an agent received, for every
+    /// profile host entry (name or *.domain) the answered name matches.
+    /// Returns true when something new was learned.
+    pub fn learn_dns(&self, records: &[crate::dns_allow::ARecord]) -> bool {
+        let patterns: Vec<String> = match self.profiles.read() {
+            Ok(ps) => ps
+                .iter()
+                .flat_map(|p| p.allow_hosts.iter())
+                .filter(|h| *h != "*" && h.parse::<IpAddr>().is_err() && parse_cidr(h).is_none())
+                .cloned()
+                .collect(),
+            Err(_) => return false,
+        };
+        if patterns.is_empty() {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        let mut new = false;
+        let Ok(mut l) = self.learned.write() else { return false };
+        for r in records {
+            let ttl = std::time::Duration::from_secs(r.ttl_secs as u64).clamp(MIN_LEARN_TTL, MAX_LEARN_TTL);
+            for pat in patterns.iter().filter(|pat| host_matches(pat, &r.name)) {
+                let e = l.entry(pat.clone()).or_default();
+                if e.insert(r.addr, now + ttl).is_none() {
+                    new = true;
+                }
+                if pat.starts_with("*.") {
+                    let name = r.name.trim_end_matches('.').to_ascii_lowercase();
+                    if let Ok(mut sn) = self.seen_names.write() {
+                        if sn.len() < MAX_SEEN_NAMES && sn.insert(name) {
+                            if let Ok(t) = serde_json::to_string(&*sn) {
+                                let _ = std::fs::write(SEEN_NAMES_PATH, t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        new
+    }
+
+    /// Forget learned addresses whose TTL has run out. True if any went.
+    pub fn expire_learned(&self) -> bool {
+        let now = std::time::Instant::now();
+        let Ok(mut l) = self.learned.write() else { return false };
+        let mut gone = false;
+        for ips in l.values_mut() {
+            let before = ips.len();
+            ips.retain(|_, exp| *exp > now);
+            gone |= ips.len() != before;
+        }
+        gone
     }
 
     pub fn report(&self) -> Vec<ProfileReport> {
@@ -424,6 +684,14 @@ impl CapabilityEngine {
                 ProfileReport { config: c, kind, stats: st, recent: rc }
             })
             .collect()
+    }
+}
+
+/// Push the current profiles into the kernel. Safe to call often: the loader
+/// only changes what differs.
+pub async fn sync_kernel() {
+    if let Some(tx) = crate::ebpf_loader::CMD_TX.get() {
+        let _ = tx.send(crate::ebpf_loader::EbpfCommand::SyncProfiles(ENGINE.kernel_state())).await;
     }
 }
 
@@ -686,5 +954,98 @@ mod tests {
         assert_eq!(parse_target("1.2.3.4:443"), Some(("1.2.3.4".parse().unwrap(), 443)));
         assert_eq!(parse_target("[::1]:80"), Some(("::1".parse().unwrap(), 80)));
         assert_eq!(parse_target("nope"), None);
+    }
+
+    fn ready(e: CapabilityEngine) -> CapabilityEngine {
+        e.names_ready.store(true, std::sync::atomic::Ordering::Release);
+        e
+    }
+
+    fn prof(name: &str, agent: &str) -> ProfileConfig {
+        ProfileConfig { name: name.into(), agent: Some(agent.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn watch_profiles_load_nothing_that_refuses() {
+        let mut p = prof("Claude Code", "claude");
+        p.allow_hosts = vec!["10.0.0.5".into()];
+        p.allow_programs = vec!["git".into()];
+        let e = CapabilityEngine::new(vec![p]);
+        let st = e.kernel_state();
+        assert_eq!(st.names, vec![("claude".to_string(), 2)]);
+        assert_eq!(st.policies, vec![(2, false, true, false)]);
+        assert!(st.programs.is_empty() && st.hosts.is_empty());
+    }
+
+    #[test]
+    fn enforced_profile_loads_its_lists() {
+        let mut p = prof("Claude Code", "claude");
+        p.allow_hosts = vec!["10.0.0.5".into(), "192.168.1.0/24".into(), "fd00::1".into()];
+        p.allow_programs = vec!["git".into(), "bash".into()];
+        p.network_mode = Mode::Enforce;
+        p.programs_mode = Mode::Enforce;
+        let e = ready(CapabilityEngine::new(vec![prof("Other", "codex"), p]));
+        let st = e.kernel_state();
+        assert!(st.policies.contains(&(3, true, true, true)));
+        assert!(st.programs.contains(&(3, "git".to_string())));
+        // IPv6 entries are not loaded: the kernel allowlist is IPv4.
+        assert_eq!(
+            st.hosts,
+            vec![(3, "10.0.0.5".parse().unwrap(), 32), (3, "192.168.1.0".parse().unwrap(), 24)]
+        );
+    }
+
+    #[test]
+    fn names_not_enforced_before_first_lookup() {
+        let mut p = prof("Claude Code", "claude");
+        p.allow_hosts = vec!["api.anthropic.com".into()];
+        p.network_mode = Mode::Enforce;
+        let e = CapabilityEngine::new(vec![p]);
+        assert_eq!(e.kernel_state().policies, vec![(2, false, true, false)]);
+        let e = ready(e);
+        assert_eq!(e.kernel_state().policies, vec![(2, false, true, true)]);
+    }
+
+    #[test]
+    fn any_host_or_any_program_never_enforces() {
+        let mut p = prof("Codex", "codex");
+        p.network_mode = Mode::Enforce;
+        p.programs_mode = Mode::Enforce;
+        // defaults: allow_hosts ["*"], allow_spawn true, no list
+        let st = CapabilityEngine::new(vec![p]).kernel_state();
+        assert_eq!(st.policies, vec![(2, false, true, false)]);
+    }
+
+    #[test]
+    fn no_spawn_enforces_with_empty_list() {
+        let mut p = prof("MCP", "x");
+        p.agent = None;
+        p.mcp_match = vec!["server-fs".into()];
+        p.allow_spawn = false;
+        p.programs_mode = Mode::Enforce;
+        let e = CapabilityEngine::new(vec![p]);
+        assert_eq!(e.kernel_state().policies, vec![(2, true, false, false)]);
+        assert_eq!(e.mcp_slot_for("node /x/server-fs/index.js"), Some(2));
+        assert_eq!(e.mcp_slot_for("node other.js"), None);
+    }
+
+    #[test]
+    fn dns_answers_teach_approved_names_only() {
+        let mut p = prof("Claude Code", "claude");
+        p.allow_hosts = vec!["api.anthropic.com".into(), "*.githubusercontent.com".into()];
+        p.network_mode = Mode::Enforce;
+        let e = ready(CapabilityEngine::new(vec![p]));
+        let rec = |n: &str, a: &str| crate::dns_allow::ARecord { name: n.into(), addr: a.parse().unwrap(), ttl_secs: 300 };
+        assert!(e.learn_dns(&[rec("api.anthropic.com.", "160.79.104.10")]));
+        assert!(e.learn_dns(&[rec("raw.githubusercontent.com", "185.199.108.133")]));
+        assert!(!e.learn_dns(&[rec("evil.example", "203.0.113.9")]));
+        assert!(!e.learn_dns(&[rec("api.anthropic.com", "160.79.104.10")]), "already known");
+        let hosts = e.kernel_state().hosts;
+        assert!(hosts.contains(&(2, "160.79.104.10".parse().unwrap(), 32)));
+        assert!(hosts.contains(&(2, "185.199.108.133".parse().unwrap(), 32)));
+        assert!(!hosts.iter().any(|h| h.1 == "203.0.113.9".parse::<std::net::Ipv4Addr>().unwrap()));
+        // The watch-mode check agrees with what the kernel was given.
+        let pr = e.profiles();
+        assert!(e.host_allowed(&pr[0], "160.79.104.10".parse().unwrap(), None));
     }
 }

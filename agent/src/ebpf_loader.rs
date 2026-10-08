@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use aya::{
-    maps::{Array, HashMap as AyaHashMap, Map, MapData, PerCpuArray, RingBuf},
+    maps::{lpm_trie::{Key as LpmKey, LpmTrie}, Array, HashMap as AyaHashMap, Map, MapData, PerCpuArray, RingBuf},
     programs::{Lsm, TracePoint},
     Bpf, BpfLoader, Btf,
 };
@@ -124,6 +124,35 @@ unsafe impl aya::Pod for TaintInfo {}
 unsafe impl aya::Pod for ProxyConfig {}
 unsafe impl aya::Pod for BlockKey {}
 unsafe impl aya::Pod for InoKey {}
+
+/// Mirrors `struct profile_policy` in ringzero.bpf.c.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct ProfilePolicy {
+    programs_enforce: u8,
+    allow_spawn: u8,
+    network_enforce: u8,
+    _pad: u8,
+}
+/// Mirrors `struct prog_key`.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct ProgKey {
+    slot: u8,
+    name: [u8; MAX_COMM_LEN],
+    _pad: [u8; 3],
+}
+/// The data half of `struct host_key` (the LPM prefix length is separate).
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct HostKeyData {
+    slot: u8,
+    _pad: [u8; 3],
+    ip: u32,
+}
+unsafe impl aya::Pod for ProfilePolicy {}
+unsafe impl aya::Pod for ProgKey {}
+unsafe impl aya::Pod for HostKeyData {}
 /// Mirrors `struct write_origin` in GPL/bpf/ringzero.bpf.c.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
@@ -701,6 +730,106 @@ fn apply_controls(bpf: &mut Bpf, c: &crate::config::ControlsSection) {
     );
 }
 
+/// Load the capability profiles into the kernel. Ordered so that nothing is
+/// refused by mistake while it runs: allowances are added first, then the
+/// per-profile switches are written, and only then are stale allowances
+/// removed.
+fn apply_profiles(bpf: &mut Bpf, st: &crate::policy::capability::KernelProfiles) {
+    use std::collections::HashSet;
+    let prog_want: HashSet<ProgKey> = st
+        .programs
+        .iter()
+        .map(|(slot, name)| ProgKey { slot: *slot, name: comm_key(name), _pad: [0; 3] })
+        .collect();
+    let host_want: HashSet<(u32, HostKeyData)> = st
+        .hosts
+        .iter()
+        .map(|(slot, net, len)| {
+            (32 + *len as u32, HostKeyData { slot: *slot, _pad: [0; 3], ip: u32::from_ne_bytes(net.octets()) })
+        })
+        .collect();
+
+    // 1. Add allowances.
+    if let Some(m) = bpf.map_mut("profile_programs") {
+        if let Ok(mut map) = AyaHashMap::<_, ProgKey, u8>::try_from(m) {
+            for k in &prog_want {
+                let _ = map.insert(*k, 1u8, 0);
+            }
+        }
+    }
+    if let Some(m) = bpf.map_mut("profile_hosts") {
+        if let Ok(mut map) = LpmTrie::<_, HostKeyData, u8>::try_from(m) {
+            for (len, d) in &host_want {
+                if let Err(e) = map.insert(&LpmKey::new(*len, *d), 1u8, 0) {
+                    warn!(err = %e, "profile host could not be loaded into the kernel");
+                }
+            }
+        }
+    }
+    // 2. Names and switches.
+    if let Some(m) = bpf.map_mut("agent_profile_by_name") {
+        if let Ok(mut map) = AyaHashMap::<_, [u8; MAX_COMM_LEN], u8>::try_from(m) {
+            let want: std::collections::HashMap<[u8; MAX_COMM_LEN], u8> =
+                st.names.iter().map(|(n, s)| (comm_key(n), *s)).collect();
+            let stale: Vec<[u8; MAX_COMM_LEN]> =
+                map.keys().filter_map(|k| k.ok()).filter(|k| !want.contains_key(k)).collect();
+            for (k, v) in &want {
+                let _ = map.insert(*k, *v, 0);
+            }
+            for k in stale {
+                let _ = map.remove(&k);
+            }
+        }
+    }
+    if let Some(m) = bpf.map_mut("profile_policy_map") {
+        if let Ok(mut map) = Array::<_, ProfilePolicy>::try_from(m) {
+            for slot in 0..256u32 {
+                let pol = st
+                    .policies
+                    .iter()
+                    .find(|(s, ..)| *s as u32 == slot)
+                    .map(|(_, pe, sp, ne)| ProfilePolicy {
+                        programs_enforce: *pe as u8,
+                        allow_spawn: *sp as u8,
+                        network_enforce: *ne as u8,
+                        _pad: 0,
+                    })
+                    .unwrap_or_default();
+                let _ = map.set(slot, pol, 0);
+            }
+        }
+    }
+    // 3. Remove what is no longer allowed.
+    if let Some(m) = bpf.map_mut("profile_programs") {
+        if let Ok(mut map) = AyaHashMap::<_, ProgKey, u8>::try_from(m) {
+            let stale: Vec<ProgKey> = map.keys().filter_map(|k| k.ok()).filter(|k| !prog_want.contains(k)).collect();
+            for k in stale {
+                let _ = map.remove(&k);
+            }
+        }
+    }
+    if let Some(m) = bpf.map_mut("profile_hosts") {
+        if let Ok(mut map) = LpmTrie::<_, HostKeyData, u8>::try_from(m) {
+            let stale: Vec<LpmKey<HostKeyData>> = map
+                .keys()
+                .filter_map(|k| k.ok())
+                .filter(|k| !host_want.contains(&(k.prefix_len(), k.data())))
+                .collect();
+            for k in stale {
+                let _ = map.remove(&k);
+            }
+        }
+    }
+    let enforcing: Vec<u8> = st.policies.iter().filter(|(_, pe, _, ne)| *pe || *ne).map(|(s, ..)| *s).collect();
+    info!(
+        profiles = st.policies.len(),
+        enforcing = enforcing.len(),
+        programs = prog_want.len(),
+        addresses = host_want.len(),
+        "Capability profiles loaded into the kernel"
+    );
+}
+
 fn load_file_access_rules(bpf: &mut Bpf) {
     let path = "/etc/ringzero/file-access-rules.json";
     let data = match std::fs::read_to_string(path) {
@@ -970,7 +1099,10 @@ pub fn apply_command(bpf: &mut Bpf, cmd: &EbpfCommand) {
         EbpfCommand::TrackAgentPid(pid) => {
             if let Some(m) = bpf.map_mut("agent_descendants") {
                 if let Ok(mut map) = AyaHashMap::<_, u32, u8>::try_from(m) {
-                    let _ = map.insert(*pid, 1u8, 0);
+                    // Never overwrite: an existing value may be a profile slot.
+                    if map.get(pid, 0).is_err() {
+                        let _ = map.insert(*pid, 1u8, 0);
+                    }
                     info!(
                         "eBPF: tracking agent PID {} (cmdline-detected) — kernel events captured",
                         pid
@@ -1046,6 +1178,14 @@ pub fn apply_command(bpf: &mut Bpf, cmd: &EbpfCommand) {
             }
         }
         EbpfCommand::SetControls(c) => apply_controls(bpf, c),
+        EbpfCommand::SyncProfiles(st) => apply_profiles(bpf, st),
+        EbpfCommand::TagProfileSlot { pid, slot } => {
+            if let Some(m) = bpf.map_mut("agent_descendants") {
+                if let Ok(mut map) = AyaHashMap::<_, u32, u8>::try_from(m) {
+                    let _ = map.insert(*pid, *slot, 0);
+                }
+            }
+        }
         EbpfCommand::SetTamperProtect(on) => {
             if let Some(m) = bpf.map_mut("config_map") {
                 if let Ok(mut map) = Array::<_, Config>::try_from(m) {
@@ -1326,6 +1466,11 @@ pub enum EbpfCommand {
     SetTamperProtect(bool),
     /// Re-apply the kernel controls (admin tools, escape tools, instruction files).
     SetControls(crate::config::ControlsSection),
+    /// Load the capability profiles (slots, programs, addresses) into the kernel.
+    SyncProfiles(crate::policy::capability::KernelProfiles),
+    /// Put a process (an agent found by command line, or an MCP server) under
+    /// a profile. Its children inherit the slot at fork.
+    TagProfileSlot { pid: u32, slot: u8 },
     /// Turn the kernel's taint-on-external-egress signal on or off at runtime.
     SetTaintOnEgress(bool),
     /// Add a destination to the egress allowlist for tainted processes.
@@ -1585,6 +1730,7 @@ pub async fn start(
     load_file_access_rules(&mut bpf);
     apply_self_protection(&mut bpf);
     apply_controls(&mut bpf, &crate::config::DaemonConfig::load().controls);
+    apply_profiles(&mut bpf, &crate::policy::capability::ENGINE.kernel_state());
 
     // Register daemon PID so tamper protection exempts us
     {

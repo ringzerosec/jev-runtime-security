@@ -198,6 +198,62 @@ struct {
     __type(value, u8);
 } agent_readonly_names SEC(".maps");
 
+// ── Capability profiles, enforced ─────────────────────────────────────────
+//
+// Every process in an agent tree carries a value in agent_descendants: 1 for
+// "an agent, no profile", 2..255 for the profile slot it belongs to. The slot
+// is set when the agent starts (by its process name, agent_profile_by_name, or
+// by the daemon for agents it recognises by command line) and copied to every
+// child at fork. A profile in enforce mode then decides, at the call itself,
+// which programs the tree may start and which addresses it may reach.
+struct profile_policy {
+    u8 programs_enforce;  // refuse programs not in profile_programs
+    u8 allow_spawn;       // 0: may not start any program
+    u8 network_enforce;   // refuse destinations not in profile_hosts
+    u8 _pad;
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 256);
+    __type(key, u32);
+    __type(value, struct profile_policy);
+} profile_policy_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_COMM_LEN]);
+    __type(value, u8);
+} agent_profile_by_name SEC(".maps");
+
+struct prog_key {
+    u8 slot;
+    char name[MAX_COMM_LEN];
+    u8 _pad[3];
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 8192);
+    __type(key, struct prog_key);
+    __type(value, u8);
+} profile_programs SEC(".maps");
+
+// Longest-prefix match over (slot, IPv4), so a profile can approve a single
+// address (prefix 32+32) or a range (32 + CIDR bits).
+struct host_key {
+    u32 prefixlen;
+    u8 slot;
+    u8 _pad[3];
+    u32 ip;
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __uint(max_entries, 16384);
+    __type(key, struct host_key);
+    __type(value, u8);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} profile_hosts SEC(".maps");
+
 // Blocked network destinations (IP:port)
 // Key: IP address (network byte order)
 // Value: 1 = blocked
@@ -503,96 +559,7 @@ static __always_inline struct proxy_config *get_proxy_config(void) {
 }
 
 // Check if this is an AI agent process or child of one
-static __always_inline int is_ai_agent(const char *comm) {
-    // Known AI agent process names
-
-    // "claude" (matches claude, claude.real, claude-code, etc.)
-    if (comm[0] == 'c' && comm[1] == 'l' && comm[2] == 'a' && comm[3] == 'u' && comm[4] == 'd' && comm[5] == 'e')
-        return 1;
-
-    // "cursor"
-    if (comm[0] == 'c' && comm[1] == 'u' && comm[2] == 'r' && comm[3] == 's' && comm[4] == 'o' && comm[5] == 'r')
-        return 1;
-
-    // "copilot"
-    if (comm[0] == 'c' && comm[1] == 'o' && comm[2] == 'p' && comm[3] == 'i' && comm[4] == 'l' && comm[5] == 'o')
-        return 1;
-
-    // "codex"
-    if (comm[0] == 'c' && comm[1] == 'o' && comm[2] == 'd' && comm[3] == 'e' && comm[4] == 'x')
-        return 1;
-
-    // "ChatGPT" — OpenAI ChatGPT/Codex desktop app (Electron). Every process it
-    // spawns (main, zygote, renderer, gpu, network/storage utility) shares the
-    // comm "ChatGPT", so this one prefix covers the whole app. comm is compared
-    // case-sensitively, so match the app's real casing, plus the lowercase form.
-    if (comm[0] == 'C' && comm[1] == 'h' && comm[2] == 'a' && comm[3] == 't' &&
-        comm[4] == 'G' && comm[5] == 'P' && comm[6] == 'T')
-        return 1;
-    if (comm[0] == 'c' && comm[1] == 'h' && comm[2] == 'a' && comm[3] == 't' &&
-        comm[4] == 'g' && comm[5] == 'p' && comm[6] == 't')
-        return 1;
-
-    // "devin"
-    if (comm[0] == 'd' && comm[1] == 'e' && comm[2] == 'v' && comm[3] == 'i' && comm[4] == 'n')
-        return 1;
-
-    // "aider"
-    if (comm[0] == 'a' && comm[1] == 'i' && comm[2] == 'd' && comm[3] == 'e' && comm[4] == 'r')
-        return 1;
-
-    // "windsurf" (Codeium IDE)
-    if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'd' && comm[4] == 's')
-        return 1;
-
-    // "agy" (Antigravity CLI — Google Gemini successor)
-    if (comm[0] == 'a' && comm[1] == 'g' && comm[2] == 'y')
-        return 1;
-
-    // "antigravity"
-    if (comm[0] == 'a' && comm[1] == 'n' && comm[2] == 't' && comm[3] == 'i' && comm[4] == 'g')
-        return 1;
-
-    // "gemini" (legacy)
-    if (comm[0] == 'g' && comm[1] == 'e' && comm[2] == 'm' && comm[3] == 'i' && comm[4] == 'n' && comm[5] == 'i')
-        return 1;
-
-    // "gemini" (Gemini CLI)
-    if (comm[0] == 'g' && comm[1] == 'e' && comm[2] == 'm' && comm[3] == 'i' && comm[4] == 'n' && comm[5] == 'i')
-        return 1;
-
-    // "agent" — Cursor CLI binary (cursor-agent renames to "agent")
-    if (comm[0] == 'a' && comm[1] == 'g' && comm[2] == 'e' && comm[3] == 'n' && comm[4] == 't' && comm[5] == '\0')
-        return 1;
-
-    // "MainThread" — Cursor/Python agent main process (Python renames comm via prctl).
-    // Must be in is_ai_agent (not just is_runtime) because this IS the top-level
-    // agent process — it has no agent ancestor, so is_agent_child() would fail.
-    if (comm[0] == 'M' && comm[1] == 'a' && comm[2] == 'i' && comm[3] == 'n' &&
-        comm[4] == 'T' && comm[5] == 'h' && comm[6] == 'r' && comm[7] == 'e')
-        return 1;
-
-    // "opencode"
-    if (comm[0] == 'o' && comm[1] == 'p' && comm[2] == 'e' && comm[3] == 'n' && comm[4] == 'c')
-        return 1;
-
-    // "hermes"
-    if (comm[0] == 'h' && comm[1] == 'e' && comm[2] == 'r' && comm[3] == 'm' && comm[4] == 'e' && comm[5] == 's')
-        return 1;
-
-    // Any "claw"-family agent: comm CONTAINS the substring "claw"
-    // (nanoclaw, nemoclaw, openclaw, closedclaw, trustclaw, ...). Bounded
-    // substring scan over the 16-byte comm; unrolled for the verifier.
-    #pragma unroll
-    for (int i = 0; i + 3 < MAX_COMM_LEN; i++) {
-        if (comm[i] == '\0')
-            break;
-        if (comm[i] == 'c' && comm[i+1] == 'l' && comm[i+2] == 'a' && comm[i+3] == 'w')
-            return 1;
-    }
-
-    return 0;
-}
+#include "agent_names.h"
 
 // Check if any ancestor (up to 4 levels) is an AI agent
 // Raise taint on a pid. Raise-only: an existing entry is never downgraded, and
@@ -851,6 +818,63 @@ static __always_inline int is_readonly_name(struct dentry *dentry) {
     char name[MAX_PATH_LEN] = {};
     bpf_probe_read_kernel_str(name, MAX_PATH_LEN, BPF_CORE_READ(dentry, d_name.name));
     return bpf_map_lookup_elem(&agent_readonly_names, name) != 0;
+}
+
+// The profile slot of the current process: 0 not an agent, 1 an agent with
+// no profile, 2..255 a profile.
+static __always_inline u8 current_profile_slot(void) {
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    u8 *v = bpf_map_lookup_elem(&agent_descendants, &pid);
+    return v ? *v : 0;
+}
+
+static __always_inline struct profile_policy *profile_policy_for(u8 slot) {
+    if (slot < 2)
+        return 0;
+    u32 k = slot;
+    return bpf_map_lookup_elem(&profile_policy_map, &k);
+}
+
+// Would the current process's profile refuse this destination? IPv4 in `ip`
+// (network order); for IPv6 pass the 16 address bytes. A v4-mapped IPv6
+// address is judged as the IPv4 it carries. Loopback, DNS, the model
+// endpoints (key_allowed_ips, and egress_allowed_ips which learns them from
+// DNS answers) are always allowed so a profile cannot cut an agent off from
+// its own model. Other IPv6 is refused: the allowlist is IPv4.
+static __always_inline int profile_net_denied(u16 family, u32 ip, const u8 *v6, u16 port) {
+    u8 slot = current_profile_slot();
+    struct profile_policy *pp = profile_policy_for(slot);
+    if (!pp || !pp->network_enforce)
+        return 0;
+    if (port == 53)
+        return 0;
+    if (family == AF_INET6) {
+        int zero10 = 1;
+        #pragma unroll
+        for (int i = 0; i < 10; i++)
+            if (v6[i]) zero10 = 0;
+        if (zero10 && v6[10] == 0xff && v6[11] == 0xff) {
+            __builtin_memcpy(&ip, &v6[12], 4);
+            family = AF_INET;
+        } else {
+            int loop = zero10 && !v6[10] && !v6[11] && !v6[12] && !v6[13] && !v6[14] && v6[15] == 1;
+            return !loop;
+        }
+    }
+    if (family != AF_INET)
+        return 0;
+    if ((ip & 0xff) == 127)
+        return 0;
+    if (bpf_map_lookup_elem(&key_allowed_ips, &ip))
+        return 0;
+    // Model endpoints learned from DNS answers, plus operator-approved egress.
+    if (bpf_map_lookup_elem(&egress_allowed_ips, &ip))
+        return 0;
+    struct host_key hk = {};
+    hk.prefixlen = 64;
+    hk.slot = slot;
+    hk.ip = ip;
+    return bpf_map_lookup_elem(&profile_hosts, &hk) == 0;
 }
 
 // Check if filename is sensitive (worth reporting)
@@ -1485,6 +1509,37 @@ int BPF_PROG(ringzero_bprm_check, struct linux_binprm *bprm) {
             }
             return -EACCES;
         }
+        // Capability profile, programs half. Only a profile in enforce mode
+        // refuses; an agent re-executing itself is always allowed.
+        if (cfg->enforce_blocks) {
+            u8 pslot = current_profile_slot();
+            struct profile_policy *pp = profile_policy_for(pslot);
+            if (pp && pp->programs_enforce) {
+                int ok = 0;
+                u8 *self_slot = bpf_map_lookup_elem(&agent_profile_by_name, exec_name);
+                if (self_slot && *self_slot == pslot)
+                    ok = 1;
+                if (!ok && pp->allow_spawn) {
+                    struct prog_key pk = {};
+                    pk.slot = pslot;
+                    __builtin_memcpy(pk.name, exec_name, MAX_COMM_LEN);
+                    if (bpf_map_lookup_elem(&profile_programs, &pk))
+                        ok = 1;
+                }
+                if (!ok) {
+                    struct event *pe = bpf_ringbuf_reserve(&events, sizeof(*pe), 0);
+                    if (pe) {
+                        pe->type = EVENT_PROCESS_EXEC;
+                        pe->blocked = 1;
+                        fill_process_info(pe);
+                        __builtin_memset(pe->path, 0, MAX_PATH_LEN);
+                        __builtin_memcpy(pe->path, exec_name, MAX_COMM_LEN);
+                        bpf_ringbuf_submit(pe, 0);
+                    }
+                    return -EACCES;
+                }
+            }
+        }
         if (cfg->enforce_blocks && agent_lineage && is_launder_tool(exec_name)) {
             struct event *le = bpf_ringbuf_reserve(&events, sizeof(*le), 0);
             if (le) {
@@ -1528,8 +1583,11 @@ int BPF_PROG(ringzero_bprm_check, struct linux_binprm *bprm) {
     // shell and never forked.
     if (is_ai_agent(exec_name)) {
         u32 ap = bpf_get_current_pid_tgid() >> 32;
-        u8 one = 1;
-        bpf_map_update_elem(&agent_descendants, &ap, &one, BPF_ANY);
+        u8 aslot = 1;
+        u8 *ns = bpf_map_lookup_elem(&agent_profile_by_name, exec_name);
+        if (ns)
+            aslot = *ns;
+        bpf_map_update_elem(&agent_descendants, &ap, &aslot, BPF_ANY);
     }
 
     // Track: AI agent parents spawning children, OR new AI agent processes
@@ -1622,11 +1680,24 @@ int handle_fork(struct trace_event_raw_sched_process_fork *ctx) {
     char pcomm[MAX_COMM_LEN] = {};
     bpf_get_current_comm(pcomm, sizeof(pcomm));
     u32 ppid = (u32)ctx->parent_pid;
-    if (!is_ai_agent(pcomm) && !bpf_map_lookup_elem(&agent_descendants, &ppid))
+    // The child gets the parent's profile slot. A parent that IS an agent by
+    // name takes its profile from agent_profile_by_name, which is how a
+    // profile follows an agent that renamed itself after starting.
+    u8 slot = 0;
+    u8 *pv = bpf_map_lookup_elem(&agent_descendants, &ppid);
+    if (pv)
+        slot = *pv;
+    if (is_ai_agent(pcomm)) {
+        u8 *ns = bpf_map_lookup_elem(&agent_profile_by_name, pcomm);
+        if (ns)
+            slot = *ns;
+        else if (!slot)
+            slot = 1;
+    }
+    if (!slot)
         return 0;
     u32 cpid = (u32)ctx->child_pid;
-    u8 one = 1;
-    bpf_map_update_elem(&agent_descendants, &cpid, &one, BPF_ANY);
+    bpf_map_update_elem(&agent_descendants, &cpid, &slot, BPF_ANY);
 
     // Propagate DLP taint down the fork too: a child forked by a process that
     // holds sensitive data inherits the taint. This is what makes the exfil
@@ -1798,7 +1869,18 @@ int BPF_PROG(ringzero_socket_connect, struct socket *sock,
     // stays exactly what it was: observe-only, return 0. The other
     // observe-only returns in this file were backed out deliberately and are
     // not touched.
-    int enforce_now = cfg->egress_enforce && should_block;
+    // Capability profile, network half: its own decision, independent of
+    // egress_enforce, taken only when the profile is in enforce mode.
+    int profile_block = 0;
+    if (cfg->enforce_blocks) {
+        u8 v6b[16] = {};
+        if (family == AF_INET6) {
+            struct sockaddr_in6 *a6 = (struct sockaddr_in6 *)address;
+            bpf_probe_read_kernel(v6b, 16, &a6->sin6_addr);
+        }
+        profile_block = profile_net_denied(family, ip, v6b, port);
+    }
+    int enforce_now = (cfg->egress_enforce && should_block) || profile_block;
 
     // Determine event type: DNS query (UDP port 53) or regular connect
     u32 evt_type = EVENT_NETWORK_CONNECT;
@@ -1830,7 +1912,46 @@ SEC("lsm/socket_sendmsg")
 int BPF_PROG(ringzero_socket_sendmsg, struct socket *sock,
              struct msghdr *msg, int size) {
     struct config *cfg = get_config();
-    if (!cfg || !cfg->enabled || !cfg->dlp_enabled)
+    if (!cfg || !cfg->enabled)
+        return 0;
+
+    // A datagram sent with an explicit address (sendto without connect) never
+    // passes socket_connect, so a profile's network limit is checked here too.
+    if (cfg->enforce_blocks && current_profile_slot() >= 2) {
+        void *name = BPF_CORE_READ(msg, msg_name);
+        if (name) {
+            u16 fam = 0;
+            bpf_probe_read_kernel(&fam, sizeof(fam), name);
+            u32 dip = 0;
+            u16 dport = 0;
+            u8 v6b[16] = {};
+            if (fam == AF_INET) {
+                struct sockaddr_in a4 = {};
+                bpf_probe_read_kernel(&a4, sizeof(a4), name);
+                dip = a4.sin_addr.s_addr;
+                dport = __bpf_ntohs(a4.sin_port);
+            } else if (fam == AF_INET6) {
+                struct sockaddr_in6 a6 = {};
+                bpf_probe_read_kernel(&a6, sizeof(a6), name);
+                __builtin_memcpy(v6b, &a6.sin6_addr, 16);
+                dport = __bpf_ntohs(a6.sin6_port);
+            }
+            if ((fam == AF_INET || fam == AF_INET6) && profile_net_denied(fam, dip, v6b, dport)) {
+                struct event *ne = bpf_ringbuf_reserve(&events, sizeof(*ne), 0);
+                if (ne) {
+                    ne->type = EVENT_NETWORK_CONNECT;
+                    ne->blocked = 1;
+                    fill_process_info(ne);
+                    ne->remote_ip = dip;
+                    ne->remote_port = dport;
+                    bpf_ringbuf_submit(ne, 0);
+                }
+                return -EACCES;
+            }
+        }
+    }
+
+    if (!cfg->dlp_enabled)
         return 0;
 
     // Only inspect AI agent processes

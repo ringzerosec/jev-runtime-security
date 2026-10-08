@@ -544,18 +544,23 @@ async fn async_main() -> Result<()> {
     let ipc_watcher = Arc::clone(&ipc);
     // Capability profiles carry host NAMES; connect events carry IPs. Keep the
     // name -> IP map fresh in the background.
-    if !policy::capability::ENGINE.is_empty() {
-        tracing::info!(
-            profiles = policy::capability::ENGINE.report().len(),
-            "Capability profiles loaded (observe: would-block is recorded, nothing is refused)"
-        );
-        tokio::spawn(async {
-            loop {
-                policy::capability::ENGINE.refresh_dns().await;
-                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-            }
-        });
-    }
+    // Every minute: look the names up again, drop learned addresses whose TTL
+    // ran out, and bring the kernel's copy up to date. Runs even with no
+    // profiles, because one can be added from the app at any time.
+    tracing::info!(
+        profiles = policy::capability::ENGINE.report().len(),
+        enforcing = policy::capability::ENGINE.any_enforced(),
+        "Capability profiles loaded"
+    );
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        loop {
+            policy::capability::ENGINE.refresh_dns().await;
+            policy::capability::ENGINE.expire_learned();
+            policy::capability::sync_kernel().await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    });
 
     let siem_watcher = Arc::clone(&siem);
     let registry_watcher = Arc::clone(&verified_registry);
@@ -914,11 +919,26 @@ async fn async_main() -> Result<()> {
                             .map(|(ip, port)| policy::capability::EventShape::Connect { ip, port, host: None }),
                         _ => Some(policy::capability::EventShape::Exec { program: &program }),
                     };
+                    // An MCP server starting: put it under its own profile so the
+                    // kernel judges its tree by that profile, not its agent's.
+                    if matches!(ev.kind, EventKind::ProcessExec) && ev.allowed {
+                        if let Some((_, cmdline)) = anc.first() {
+                            if let Some(slot) = policy::capability::ENGINE.mcp_slot_for(cmdline) {
+                                if let Some(tx) = ebpf_loader::CMD_TX.get() {
+                                    let _ = tx.try_send(ebpf_loader::EbpfCommand::TagProfileSlot { pid, slot });
+                                }
+                            }
+                        }
+                    }
                     if let Some(shape) = shape {
                         if let Some(v) = policy::capability::ENGINE.check(shape, pid, &ev.process, &anc, agent_of) {
-                            tracing::info!(pid, profile = %v.profile, rule = %v.rule, detail = %v.detail, "Capability profile would-block (observe)");
+                            tracing::info!(pid, profile = %v.profile, rule = %v.rule, detail = %v.detail, refused = !ev.allowed, "Outside capability profile");
                             if ev.reason.is_none() {
-                                ev.reason = Some(format!("Would block — {}: {}", v.profile, v.detail));
+                                ev.reason = Some(if ev.allowed {
+                                    format!("Outside limits (watching) — {}: {}", v.profile, v.detail)
+                                } else {
+                                    format!("Blocked — {}: {}", v.profile, v.detail)
+                                });
                             }
                         }
                     }
@@ -2611,6 +2631,15 @@ async fn async_main() -> Result<()> {
                 if let Ok(guard) = scan_cmd.try_read() {
                     if let Some(tx) = guard.as_ref() {
                         let _ = tx.try_send(ebpf_loader::EbpfCommand::TrackAgentPid(pid));
+                        // An agent found by command line (it runs as node or
+                        // python) gets its profile here; the kernel cannot
+                        // recognise it by name.
+                        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+                        if let Some(agent) = common::agent_detect::detect_agent_for_pid(pid, comm.trim()) {
+                            if let Some(slot) = policy::capability::ENGINE.slot_for_agent(agent) {
+                                let _ = tx.try_send(ebpf_loader::EbpfCommand::TagProfileSlot { pid, slot });
+                            }
+                        }
                     }
                 }
             };

@@ -146,7 +146,7 @@ pub struct DaemonSection {
     pub socket_path: Option<String>,
     /// Tamper protection (default on): the daemon cannot be killed except by
     /// systemd or debugged, and agent process trees cannot use bpf(). Turn it
-    /// off for maintenance with `rz tamper disable` (admin password).
+    /// off for maintenance with `rz settings set tamper_protection off` (admin password).
     pub tamper_protection: bool,
 }
 

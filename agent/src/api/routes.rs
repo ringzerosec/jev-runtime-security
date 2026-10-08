@@ -2152,6 +2152,8 @@ async fn policy_profile_upsert(
     match crate::policy::capability::ENGINE.upsert(p) {
         Ok(list) => {
             tracing::info!(profile = %name, "capability profile saved");
+            crate::policy::capability::ENGINE.refresh_dns().await;
+            crate::policy::capability::sync_kernel().await;
             (StatusCode::OK, Json(serde_json::json!({ "ok": true, "profiles": list })))
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "error": e }))),
@@ -2215,6 +2217,7 @@ async fn policy_profile_remove(
     match crate::policy::capability::ENGINE.remove(&name) {
         Ok(list) => {
             tracing::info!(profile = %name, "capability profile removed");
+            crate::policy::capability::sync_kernel().await;
             (StatusCode::OK, Json(serde_json::json!({ "ok": true, "profiles": list })))
         }
         Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "ok": false, "error": e }))),
@@ -2227,7 +2230,7 @@ async fn policy_profile_remove(
 async fn policy_profiles(State(_state): State<ApiState>) -> impl IntoResponse {
     let cfg = crate::config::DaemonConfig::load();
     Json(serde_json::json!({
-        "stage": "observe",
+        "stage": "enforce",
         "mode": cfg.daemon.mode,
         "tamper_protection": cfg.daemon.tamper_protection,
         "prompt_guard": cfg.dlp.prompt_guard,

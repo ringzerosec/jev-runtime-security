@@ -36,6 +36,8 @@ interface Profile {
   allow_hosts: string[];
   allow_spawn: boolean;
   allow_programs: string[];
+  network_mode?: 'watch' | 'enforce';
+  programs_mode?: 'watch' | 'enforce';
   stats: { allowed: number; would_block: number };
   recent: Violation[];
 }
@@ -237,6 +239,9 @@ export default function Policy() {
     : [];
 
   const enforcing = state?.mode === 'enforce';
+  const blockingProfiles = (state?.profiles ?? []).filter(
+    (p) => p.network_mode === 'enforce' || p.programs_mode === 'enforce',
+  ).length;
   const c = state?.controls;
   const controlsTotal = 4;
   const controlsOn = c ? [c.admin_tools, c.escape_tools, c.instruction_files, c.quarantine].filter(Boolean).length : 0;
@@ -397,9 +402,15 @@ export default function Policy() {
           title="Agent & tool permissions"
           question="What may each agent and MCP server do?"
           right={
-            <Badge variant="outline" className="gap-1 border-amber-500/30 text-amber-500">
-              <Eye className="h-3 w-3" /> Watching only
-            </Badge>
+            blockingProfiles > 0 ? (
+              <Badge variant="outline" className="gap-1 border-emerald-500/30 text-emerald-500">
+                <Lock className="h-3 w-3" /> Blocking for {blockingProfiles}
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="gap-1 border-amber-500/30 text-amber-500">
+                <Eye className="h-3 w-3" /> Watching only
+              </Badge>
+            )
           }
         />
         {state && state.profiles.length === 0 ? (

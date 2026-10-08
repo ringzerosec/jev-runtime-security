@@ -38,7 +38,7 @@ const toConfig = (p: Profile) => ({
 });
 const sameConfig = (a: Profile, b: Profile) => JSON.stringify(toConfig(a)) === JSON.stringify(toConfig(b));
 
-function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label: string }) {
+function Switch({ on, onChange, label, blocking }: { on: boolean; onChange: (v: boolean) => void; label: string; blocking?: boolean }) {
   return (
     <button
       role="switch"
@@ -47,11 +47,37 @@ function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boolean) =
       onClick={() => onChange(!on)}
       className={cn(
         'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
-        on ? 'bg-amber-500' : 'bg-muted-foreground/30',
+        on ? (blocking ? 'bg-primary' : 'bg-amber-500') : 'bg-muted-foreground/30',
       )}
     >
       <span className={cn('inline-block h-4 w-4 rounded-full bg-white shadow transition-transform', on ? 'translate-x-4' : 'translate-x-0.5')} />
     </button>
+  );
+}
+
+/** Watch records what is outside the limit; Block makes the kernel refuse it. */
+function ModeToggle({ mode, onChange, label }: { mode: 'watch' | 'enforce'; onChange: (m: 'watch' | 'enforce') => void; label: string }) {
+  return (
+    <div className="inline-flex rounded-md border p-0.5 text-[10px] mt-1" role="radiogroup" aria-label={label}>
+      {(['watch', 'enforce'] as const).map((m) => (
+        <button
+          key={m}
+          role="radio"
+          aria-checked={mode === m}
+          onClick={() => mode !== m && onChange(m)}
+          className={cn(
+            'px-2 py-0.5 rounded',
+            mode === m
+              ? m === 'enforce'
+                ? 'bg-primary text-primary-foreground font-medium'
+                : 'bg-amber-500/15 text-amber-700 font-medium'
+              : 'text-muted-foreground hover:bg-muted',
+          )}
+        >
+          {m === 'watch' ? 'Watch' : 'Block'}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -127,6 +153,8 @@ function Row({ p, onChange }: { p: Profile; onChange: (p: Profile) => void }) {
     }
   };
 
+  const netMode = p.network_mode ?? 'watch';
+  const progMode = p.programs_mode ?? 'watch';
   const netText = !netLimited ? 'Any host' : hosts.length ? 'Approved hosts only' : 'No network';
   const progText = !progLimited ? 'Any program' : p.allow_programs.length ? 'Approved programs only' : 'No programs';
 
@@ -142,19 +170,25 @@ function Row({ p, onChange }: { p: Profile; onChange: (p: Profile) => void }) {
         </div>
 
         <div className="flex items-center gap-2.5">
-          <Switch on={netLimited} label={`${p.name}: limit network`} onChange={setNet} />
+          <Switch on={netLimited} blocking={netMode === 'enforce'} label={`${p.name}: limit network`} onChange={setNet} />
           <div className="text-xs leading-tight">
             <div className="font-medium">{netText}</div>
             {netLimited && hosts.length > 0 && <div className="text-muted-foreground">{hosts.length} approved</div>}
+            {netLimited && (
+              <ModeToggle mode={netMode} label={`${p.name}: network watch or block`} onChange={(m) => onChange({ ...p, network_mode: m })} />
+            )}
           </div>
         </div>
 
         <div className="flex items-center gap-2.5">
-          <Switch on={progLimited} label={`${p.name}: limit programs`} onChange={setProg} />
+          <Switch on={progLimited} blocking={progMode === 'enforce'} label={`${p.name}: limit programs`} onChange={setProg} />
           <div className="text-xs leading-tight">
             <div className="font-medium">{progText}</div>
             {progLimited && p.allow_programs.length > 0 && (
               <div className="text-muted-foreground">{p.allow_programs.length} approved</div>
+            )}
+            {progLimited && (
+              <ModeToggle mode={progMode} label={`${p.name}: programs watch or block`} onChange={(m) => onChange({ ...p, programs_mode: m })} />
             )}
           </div>
         </div>
@@ -182,7 +216,7 @@ function Row({ p, onChange }: { p: Profile; onChange: (p: Profile) => void }) {
       )}
       {showRecent && (
         <div className="px-5 pb-3 space-y-1">
-          <div className="text-[11px] font-medium text-muted-foreground mb-1">Latest outside the limits (recorded, not refused)</div>
+          <div className="text-[11px] font-medium text-muted-foreground mb-1">Latest outside the limits</div>
           {p.recent.map((v, i) => (
             <div key={i} className="text-xs flex gap-2">
               <span className="text-muted-foreground tabular-nums shrink-0">{new Date(v.at).toLocaleTimeString()}</span>
@@ -198,7 +232,10 @@ function Row({ p, onChange }: { p: Profile; onChange: (p: Profile) => void }) {
             <div>
               <div className="flex items-center gap-1.5 text-xs font-medium mb-2"><Globe className="h-3.5 w-3.5" /> Approved hosts</div>
               <ListEditor items={hosts} onChange={(v) => onChange({ ...p, allow_hosts: v })} placeholder="10.0.0.0/24, 10.0.0.5, api.example.com" />
-              <p className="text-[11px] text-muted-foreground mt-1.5">Empty means no network at all. IPs and ranges are exact; host names are looked up every 5 minutes.</p>
+              <p className="text-[11px] text-muted-foreground mt-1.5">
+                Empty means no network at all. Host names are looked up every minute, and addresses the agent's own
+                DNS answers return for them are added too. *.domain works through those answers. IPv4 only.
+              </p>
             </div>
           )}
           {progLimited && (
@@ -209,7 +246,10 @@ function Row({ p, onChange }: { p: Profile; onChange: (p: Profile) => void }) {
                 onChange={(v) => onChange({ ...p, allow_spawn: v.length > 0, allow_programs: v })}
                 placeholder="git"
               />
-              <p className="text-[11px] text-muted-foreground mt-1.5">Empty means it may not start any program.</p>
+              <p className="text-[11px] text-muted-foreground mt-1.5">
+                Empty means it may not start any program. A script needs its own name and its interpreter
+                (for example bash) on the list.
+              </p>
             </div>
           )}
         </div>
@@ -265,9 +305,10 @@ export default function PermissionsPanel({ profiles, onSaved }: { profiles: Prof
   return (
     <div className="rounded-xl border bg-card overflow-hidden">
       <div className="px-5 py-2.5 border-b text-xs text-muted-foreground">
-        A switch that is on limits that agent to its approved list. These limits are watched, not
-        enforced yet: anything outside them is recorded and counted, never refused. Counts start
-        when Ring Zero starts.
+        A switch that is on limits that agent to its approved list. <span className="font-medium text-amber-700">Watch</span>{' '}
+        records anything outside the limit; <span className="font-medium text-primary">Block</span> makes the kernel refuse it,
+        for the agent and everything it starts. Watch first, then block. The agent's own model service is always
+        reachable. Counts start when Ring Zero starts.
       </div>
       <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_96px] gap-4 px-5 py-2 border-b bg-muted/30 text-[11px] uppercase tracking-wider text-muted-foreground">
         <span>Agent / MCP server</span>
