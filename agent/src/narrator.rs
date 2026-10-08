@@ -8,15 +8,15 @@
 // thinking, which files it reads and writes, what it runs, and above all what
 // Ring Zero Security refused.
 //
-// The app reads the lines over GET /api/v1/commentary, shows them as captions
-// and speaks them. Each line has a level so the speaker can choose: an `Alert`
-// (something was refused) cuts in; `Info` may be skipped when the agent is
-// busier than anyone can listen to.
+// The app reads the lines over GET /api/v1/commentary and shows them as
+// captions; each session's commentary is rebuilt for its Commentary tab.
+// Each line has a level: an `Alert` means something was refused, a `Notice`
+// is worth a look, `Info` is routine progress.
 //
 // Deterministic on purpose: the words come from templates over facts the
 // daemon already has, so a line can never claim something that did not
 // happen. Every line passes through the secret detector before it is stored,
-// so a key in a prompt or a message is never read aloud.
+// so a key in a prompt or a message never appears in it.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -614,12 +614,12 @@ fn first_sentence(text: &str, max_words: usize) -> String {
     out
 }
 
-/// Mask secrets and squeeze whitespace, so nothing sensitive is spoken.
+/// Mask secrets and squeeze whitespace, so nothing sensitive is shown.
 fn speakable(text: &str) -> String {
     let masked = crate::secrets::prompt_guard::check(text, crate::secrets::prompt_guard::PromptGuardMode::Warn);
     let mut out = masked.redacted;
     if !masked.findings.is_empty() {
-        // A masked secret reads badly aloud; say what it was instead.
+        // Say what a masked secret was rather than showing the mask.
         out = out
             .split_whitespace()
             .map(|w| if w.contains("***") || w.contains('…') { "[a secret]" } else { w })

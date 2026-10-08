@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// LiveCommentary.tsx — captions for the live commentary, and its switch.
+// LiveCommentary.tsx — live commentary captions, and the switch for them.
 
 import { useEffect, useState } from 'react';
 import { useCommentary, type CommentaryLine } from '../lib/commentary';
 import { cn } from '../lib/utils';
-import { ShieldAlert, Eye, Sparkles, Radio, Volume2, VolumeX } from 'lucide-react';
+import { ShieldAlert, Eye, Sparkles, Radio } from 'lucide-react';
 
 const HIDE_AFTER_MS = 9000;
 
@@ -77,17 +77,9 @@ export function CommentaryCaptions() {
 
 /** The switch, for the bottom of the sidebar. */
 export function CommentarySwitch() {
-  const { enabled, voice, engine, setEnabled, setVoice } = useCommentary();
-  const voiceText =
-    engine === 'kokoro' || engine === 'piper' || engine === 'espeak'
-      ? 'Voice runs on this machine'
-      : engine === 'browser'
-        ? "Uses this browser's voice"
-        : engine === 'none'
-          ? 'Captions only: no voice installed'
-          : '';
+  const { enabled, setEnabled } = useCommentary();
   return (
-    <div className="mx-3 mb-3 rounded-lg border bg-card px-3 py-2.5 space-y-2">
+    <div className="mx-3 mb-3 rounded-lg border bg-card px-3 py-2.5 space-y-1">
       <div className="flex items-center gap-2">
         <Radio className={cn('h-4 w-4', enabled ? 'text-red-500' : 'text-muted-foreground')} />
         <span className="text-sm font-medium flex-1">Live commentary</span>
@@ -104,15 +96,7 @@ export function CommentarySwitch() {
           <span className={cn('inline-block h-4 w-4 rounded-full bg-white shadow transition-transform', enabled ? 'translate-x-4' : 'translate-x-0.5')} />
         </button>
       </div>
-      {enabled && (
-        <button
-          onClick={() => setVoice(!voice)}
-          className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground"
-        >
-          {voice ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
-          {voice ? voiceText || 'Voice on' : 'Voice off, captions only'}
-        </button>
-      )}
+      {enabled && <div className="text-[11px] text-muted-foreground">Captions while agents work. Full story per session in Sessions.</div>}
     </div>
   );
 }

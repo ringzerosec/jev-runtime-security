@@ -8,7 +8,6 @@
 //   - the daemon's Unix socket (newline-delimited JSON, peer-credential checked)
 
 mod privileged;
-mod voice;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -364,26 +363,6 @@ fn to_tauri_event(se: DaemonSecurityEvent) -> Event {
 
 // ── Privileged writes ─────────────────────────────────────────────────────────
 
-/// Speak one line of live commentary on this machine. `interrupt` cuts off
-/// whatever is playing (used when Ring Zero refused something).
-#[tauri::command]
-async fn speak_line(text: String, interrupt: bool) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || voice::speak(&text, interrupt).map(str::to_string))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-/// Which voice is available: "piper", "espeak" or "none" (captions only).
-#[tauri::command]
-fn voice_engine() -> String {
-    voice::engine().to_string()
-}
-
-#[tauri::command]
-fn voice_stop() {
-    voice::stop();
-}
-
 /// Run one allow-listed `rz` command as root through polkit, and say plainly
 /// what happened.
 ///
@@ -636,9 +615,6 @@ pub fn run() {
             get_events,
             update_policy,
             privileged_rz,
-            speak_line,
-            voice_engine,
-            voice_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
