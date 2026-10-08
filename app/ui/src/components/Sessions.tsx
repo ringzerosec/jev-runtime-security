@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import { runPrivilegedSequence, describeFailure } from '@/lib/privileged';
+import { toast } from './ui/toast';
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { daemonFetch } from '../lib/daemonApi';
 import {
@@ -872,6 +874,15 @@ function SessionEventRow({
     IconEl = Globe;
   }
 
+  // A refusal reads as one, whatever kind of event it was. Before this every
+  // file event was drawn green, so a blocked read looked like a successful one.
+  if (!event.allowed) {
+    badgeBg = 'bg-red-100';
+    badgeText = 'text-red-700';
+    badgeLabel = `${badgeLabel} · Blocked`;
+    rowBg = 'bg-red-50/40';
+  }
+
   // For AI prompts: show the user message
   // For AI responses: show a preview of the response text, not the provider:model target
   const displayTarget =
@@ -1033,7 +1044,7 @@ function SessionEventRow({
 
 // ── Session detail (unified process tree view) ────────────────────────────────
 
-type SessionFilter = 'all' | 'ai' | 'files';
+type SessionFilter = 'all' | 'ai' | 'files' | 'commentary';
 
 function SessionDetail({
   session,
@@ -1050,6 +1061,25 @@ function SessionDetail({
   const [llmEvents, setLlmEvents] = useState<SessionEvent[]>([]);
   const [llmLoading, setLlmLoading] = useState(true);
   const [filter, setFilter] = useState<SessionFilter>('all');
+  const [commentary, setCommentary] = useState<{ seq: number; at: string; level: string; text: string }[]>([]);
+  useEffect(() => {
+    if (filter !== 'commentary') return;
+    let stop = false;
+    const load = async () => {
+      try {
+        const res = await daemonFetch(`${DAEMON_API}/sessions/${session.id}/commentary`);
+        if (res.ok && !stop) setCommentary((await res.json()).lines ?? []);
+      } catch {
+        /* daemon offline */
+      }
+    };
+    load();
+    const t = setInterval(load, 5000);
+    return () => {
+      stop = true;
+      clearInterval(t);
+    };
+  }, [filter, session.id]);
   const [policy, setPolicy] = useState<SessionPolicy | null>(null);
   const [violations, setViolations] = useState<BaselineViolation[]>([]);
   const [containment, setContainment] = useState<ContainmentStatus | null>(null);
@@ -1279,8 +1309,8 @@ function SessionDetail({
         <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border">
           {[
             { id: 'all' as SessionFilter, label: 'All' },
-
             { id: 'files' as SessionFilter, label: 'Files Only' },
+            { id: 'commentary' as SessionFilter, label: 'Commentary' },
           ].map((f) => (
             <button
               key={f.id}
@@ -1296,12 +1326,33 @@ function SessionDetail({
             </button>
           ))}
           <span className="text-[11px] text-muted-foreground ml-auto font-mono">
-            {filtered.length} events
+            {filter === 'commentary' ? `${commentary.length} lines` : `${filtered.length} events`}
           </span>
         </div>
 
-        {/* Events */}
-        {eventsLoading && llmLoading ? (
+        {/* Commentary: the session told as it happened */}
+        {filter === 'commentary' ? (
+          commentary.length === 0 ? (
+            <div className="text-center py-12 text-xs text-muted-foreground">Nothing to tell yet for this session.</div>
+          ) : (
+            <ol className="max-h-[700px] overflow-y-auto divide-y divide-border/30">
+              {commentary.map((l) => (
+                <li key={l.seq} className={cn('flex items-start gap-3 px-4 py-2.5', l.level === 'alert' && 'bg-red-50/50')}>
+                  <span className="text-[11px] text-muted-foreground tabular-nums font-mono pt-0.5 shrink-0">
+                    {new Date(l.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                  </span>
+                  <span
+                    className={cn(
+                      'mt-1.5 h-2 w-2 rounded-full shrink-0',
+                      l.level === 'alert' ? 'bg-red-500' : l.level === 'notice' ? 'bg-amber-500' : 'bg-[#01696F]/50',
+                    )}
+                  />
+                  <span className={cn('text-sm leading-snug', l.level === 'alert' && 'text-red-700 font-medium')}>{l.text}</span>
+                </li>
+              ))}
+            </ol>
+          )
+        ) : eventsLoading && llmLoading ? (
           <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
             <RefreshCw className="h-4 w-4 mr-2 animate-spin" /> Loading…
           </div>
@@ -1591,10 +1642,20 @@ export default function Sessions() {
     return () => clearInterval(id);
   }, [fetchSessions]);
 
+  // Ending a session stops the agent's processes, so it goes through the
+  // administrator password like every other change. The app's own token is
+  // read-only and the daemon refuses it, which is why the old direct call
+  // silently did nothing.
   async function handleTerminate(id: string) {
-    await daemonFetch(`${DAEMON_API}/sessions/${id}`, { method: 'DELETE' });
+    const r = await runPrivilegedSequence([['sessions', 'terminate', id]]);
+    if (r.ok) {
+      toast({ variant: 'success', title: 'Session ended', description: "The agent's processes were stopped." });
+      setSelected(null);
+    } else {
+      const { title, description } = describeFailure(r);
+      toast({ variant: 'error', title, description });
+    }
     fetchSessions();
-    setSelected(null);
   }
 
   const displayed = sessions.filter((s) => {

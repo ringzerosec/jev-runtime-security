@@ -80,6 +80,10 @@ struct State {
     reads: Option<PendingReads>,
     last_thinking: HashMap<String, Instant>,
     sessions_seen: HashMap<String, Instant>,
+    /// Rebuilding a session's commentary from stored events: no repeat
+    /// suppression, and each line takes its event's time.
+    replay: bool,
+    stamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub struct Narrator {
@@ -95,6 +99,8 @@ pub static NARRATOR: once_cell::sync::Lazy<Narrator> = once_cell::sync::Lazy::ne
         reads: None,
         last_thinking: HashMap::new(),
         sessions_seen: HashMap::new(),
+        replay: false,
+        stamp: None,
     }),
     notify: tokio::sync::Notify::new(),
 });
@@ -131,14 +137,19 @@ impl Narrator {
             return;
         }
         let now = Instant::now();
-        st.recent_text.retain(|_, t| now.duration_since(*t) < REPEAT_WINDOW);
-        if st.recent_text.contains_key(&text) {
-            return;
+        if !st.replay {
+            st.recent_text.retain(|_, t| now.duration_since(*t) < REPEAT_WINDOW);
+            if st.recent_text.contains_key(&text) {
+                return;
+            }
+            st.recent_text.insert(text.clone(), now);
+        } else if st.lines.back().is_some_and(|l| l.text == text) {
+            return; // the same sentence twice in a row says nothing new
         }
-        st.recent_text.insert(text.clone(), now);
         st.seq += 1;
-        let line = Line { seq: st.seq, at: chrono::Utc::now(), level, agent: agent.to_string(), kind, text };
-        if st.lines.len() >= KEEP {
+        let at = st.stamp.unwrap_or_else(chrono::Utc::now);
+        let line = Line { seq: st.seq, at, level, agent: agent.to_string(), kind, text };
+        if !st.replay && st.lines.len() >= KEEP {
             st.lines.pop_front();
         }
         st.lines.push_back(line);
@@ -165,9 +176,37 @@ impl Narrator {
         }
     }
 
+    /// Rebuild the commentary for a set of stored events, oldest first.
+    pub fn replay(events: &[SecurityEvent]) -> Vec<Line> {
+        let n = Narrator {
+            state: Mutex::new(State {
+                seq: 0,
+                lines: VecDeque::new(),
+                recent_text: HashMap::new(),
+                reads: None,
+                last_thinking: HashMap::new(),
+                sessions_seen: HashMap::new(),
+                replay: true,
+                stamp: None,
+            }),
+            notify: tokio::sync::Notify::new(),
+        };
+        let mut sorted: Vec<&SecurityEvent> = events.iter().collect();
+        sorted.sort_by_key(|e| e.timestamp);
+        for e in sorted {
+            n.observe(e);
+        }
+        let mut st = n.state.lock().unwrap_or_else(|e| e.into_inner());
+        n.flush_reads(&mut st);
+        st.lines.iter().cloned().collect()
+    }
+
     /// Every recorded event comes through here.
     pub fn observe(&self, ev: &SecurityEvent) {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.replay {
+            st.stamp = Some(ev.timestamp);
+        }
         let agent = agent_name(&ev.process);
         let extra = ev.extra.as_ref();
 
@@ -314,6 +353,16 @@ impl Narrator {
             return;
         }
 
+        // First word from an agent without hooks: say it is working.
+        if is_known_agent(agent) && agent != "Claude Code" {
+            let key = format!("kernel:{agent}");
+            let now = Instant::now();
+            if !st.sessions_seen.get(&key).is_some_and(|t| now.duration_since(*t) < Duration::from_secs(1800)) {
+                st.sessions_seen.insert(key, now);
+                self.push(st, Level::Info, agent, "start", format!("{agent} is at work."));
+            }
+        }
+
         if !ev.allowed {
             self.flush_reads(st);
             let text = match ev.kind {
@@ -331,7 +380,16 @@ impl Narrator {
                 }
                 _ => match describe_protected(&lower, &ev.kind) {
                     Some(t) => format!("{agent} just tried to {t}. Blocked by Ring Zero Security."),
-                    None => format!("{agent} tried to touch {name}, which is protected. Blocked."),
+                    None => {
+                        let verb = match ev.kind {
+                            EventKind::FileCreate => "create",
+                            EventKind::FileDelete => "delete",
+                            EventKind::FileRename => "move",
+                            EventKind::FileWrite => "change",
+                            _ => "read",
+                        };
+                        format!("{agent} tried to {verb} {name}, which is protected. Blocked.")
+                    }
                 },
             };
             self.push(st, Level::Alert, agent, "blocked", text);
@@ -341,14 +399,6 @@ impl Narrator {
         // Any agent, from what the kernel saw: first say it is working, then
         // the programs it runs and the files it saves. This is what makes the
         // commentary work for agents without hooks or a transcript we read.
-        if is_known_agent(agent) && agent != "Claude Code" {
-            let key = format!("kernel:{agent}");
-            let now = Instant::now();
-            if !st.sessions_seen.get(&key).is_some_and(|t| now.duration_since(*t) < Duration::from_secs(1800)) {
-                st.sessions_seen.insert(key, now);
-                self.push(st, Level::Info, agent, "start", format!("{agent} is at work."));
-            }
-        }
         // Claude Code reports its own commands and edits through hooks, which
         // say more; the kernel lines would only repeat them.
         if is_known_agent(agent) && agent != "Claude Code" {
@@ -462,6 +512,10 @@ fn describe_command(cmd: &str) -> String {
 }
 
 /// The name people use for an agent.
+pub fn agent_label(process: &str) -> String {
+    agent_name(process)
+}
+
 fn agent_name(process: &str) -> String {
     let p = process.to_ascii_lowercase();
     let n = if p.starts_with("claude") {
@@ -606,6 +660,8 @@ mod tests {
                 reads: None,
                 last_thinking: HashMap::new(),
                 sessions_seen: HashMap::new(),
+                replay: false,
+                stamp: None,
             }),
             notify: tokio::sync::Notify::new(),
         }
@@ -731,6 +787,23 @@ mod tests {
         n.observe(&w);
         let t: Vec<String> = texts(&n).into_iter().map(|x| x.1).collect();
         assert_eq!(t, vec!["opencode is at work.", "opencode is running git.", "opencode saved login.ts."]);
+    }
+
+    #[test]
+    fn replay_keeps_event_times_and_repeats_minutes_apart() {
+        let mut a = ev(EventKind::FileOpen, "opencode", "id_rsa", false);
+        a.timestamp = chrono::Utc::now() - chrono::Duration::minutes(10);
+        let mut b = a.clone();
+        b.timestamp = chrono::Utc::now() - chrono::Duration::minutes(2);
+        let mut g = ev(EventKind::ProcessExec, "opencode", "/usr/bin/git", true);
+        g.timestamp = chrono::Utc::now() - chrono::Duration::minutes(5);
+        let lines = Narrator::replay(&[b.clone(), a.clone(), g]);
+        let t: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(t[0], "opencode is at work.");
+        assert!(t[1].contains("SSH key"));
+        assert_eq!(t[2], "opencode is running git.");
+        assert!(t[3].contains("SSH key"), "a repeat minutes later is told again");
+        assert_eq!(lines[1].at, a.timestamp);
     }
 
     #[test]

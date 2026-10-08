@@ -128,6 +128,7 @@ pub fn make_router(state: ApiState) -> Router {
         .route("/api/v1/webhooks/stats", get(get_webhook_stats))
         .route("/api/v1/events", get(get_events))
         .route("/api/v1/commentary", get(get_commentary))
+        .route("/api/v1/sessions/:id/commentary", get(get_session_commentary))
         .route("/api/v1/threats", get(get_threats))
         .route("/api/v1/policy", get(get_policy).post(update_policy))
         .route("/api/v1/intent-diffs", get(get_intent_diffs))
@@ -587,6 +588,42 @@ async fn get_commentary(Query(q): Query<CommentaryQuery>) -> impl IntoResponse {
         crate::narrator::NARRATOR.wait(q.after, wait).await
     };
     Json(serde_json::json!({ "lines": lines, "last": last }))
+}
+
+/// GET /api/v1/sessions/:id/commentary — the session's commentary, rebuilt
+/// from what was recorded: its kernel events, the agent's prompts and tool
+/// calls in the session's span, and the agent's thinking lines heard live.
+async fn get_session_commentary(State(state): State<ApiState>, Path(id): Path<String>) -> impl IntoResponse {
+    use crate::common::event::EventKind;
+    let Some(sess) = state.sessions.get(&id) else {
+        return err_resp(StatusCode::NOT_FOUND, "session not found").into_response();
+    };
+    let agent = crate::narrator::agent_label(&sess.actor);
+    let mut events = state.sessions.get_events(&id);
+    let mut seen: std::collections::HashSet<String> = events.iter().map(|e| e.id.clone()).collect();
+    if let Ok(all) = state.timeline.all_recent(7 * 86400, 5000) {
+        for e in all {
+            if matches!(e.kind, EventKind::LlmRequest | EventKind::LlmResponse | EventKind::LlmToolCall)
+                && e.timestamp >= sess.start_time
+                && sess.end_time.map_or(true, |end| e.timestamp <= end)
+                && crate::narrator::agent_label(&e.process) == agent
+                && seen.insert(e.id.clone())
+            {
+                events.push(e);
+            }
+        }
+    }
+    let mut lines = crate::narrator::Narrator::replay(&events);
+    let (live, _) = crate::narrator::NARRATOR.since(0);
+    lines.extend(
+        live.into_iter()
+            .filter(|l| l.kind == "thinking" && l.agent == agent && l.at >= sess.start_time),
+    );
+    lines.sort_by_key(|l| l.at);
+    for (i, l) in lines.iter_mut().enumerate() {
+        l.seq = i as u64 + 1;
+    }
+    Json(serde_json::json!({ "session_id": id, "agent": agent, "lines": lines })).into_response()
 }
 
 async fn get_threats(State(state): State<ApiState>) -> impl IntoResponse {

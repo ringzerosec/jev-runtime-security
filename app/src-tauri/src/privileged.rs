@@ -131,6 +131,17 @@ pub fn validate(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        // rz sessions terminate <session id> — ends the agent's processes.
+        ["sessions", "terminate", id] => {
+            if !id.is_empty()
+                && id.len() <= 128
+                && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+            {
+                Ok(())
+            } else {
+                Err("not a session id".into())
+            }
+        }
         // rz settings set <tamper_protection on|off | prompt_guard off|warn|block>
         [
             "settings",
@@ -317,6 +328,9 @@ mod tests {
         assert!(v(&["settings", "set", "instruction_files", "on"]).is_ok());
         assert!(v(&["settings", "set", "quarantine", "on"]).is_ok());
         assert!(v(&["settings", "set", "admin_tools", "sudo"]).is_err());
+        assert!(v(&["sessions", "terminate", "auto-opencode-8795"]).is_ok());
+        assert!(v(&["sessions", "terminate", "../x"]).is_err());
+        assert!(v(&["sessions", "terminate", "a b"]).is_err());
         assert!(v(&["settings", "set", "mode", "observe"]).is_err(), "only the listed switches");
     }
 
