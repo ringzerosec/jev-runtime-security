@@ -64,7 +64,7 @@ fn player_command() -> Option<Command> {
     }
     if on_path("pw-play") {
         let mut c = Command::new("pw-play");
-        c.args(["--rate", &SAMPLE_RATE.to_string(), "--channels", "1", "--format", "s16", "-"]);
+        c.args(["--raw", "--rate", &SAMPLE_RATE.to_string(), "--channels", "1", "--format", "s16", "-"]);
         return Some(c);
     }
     if on_path("aplay") {
