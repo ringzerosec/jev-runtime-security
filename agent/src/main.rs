@@ -1549,6 +1549,15 @@ async fn async_main() -> Result<()> {
 
                 // Only persist and analyze events from detected agent sessions
                 // (skip system noise to avoid 100% CPU and log spam)
+                // A helper's event (cat, head, curl) names only the helper. Say
+                // which agent it belongs to, so a refusal reads "opencode tried
+                // to read .env", not "head tried to read .env".
+                if ev.parent_process.is_none() && !common::agent_detect::is_ai_agent(&ev.process) {
+                    if let Some(s) = matched_session_id.as_deref().and_then(|id| sessions_c.get(id)) {
+                        ev.parent_process = Some(s.actor.clone());
+                    }
+                }
+
                 if matched_session_id.is_none() {
                     // Log the process name at debug level so we can diagnose detection
                     tracing::warn!(

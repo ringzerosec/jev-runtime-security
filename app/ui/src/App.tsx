@@ -11,7 +11,8 @@ import Sidebar from './components/Sidebar';
 import HealthBanner from './components/HealthBanner';
 import Dashboard from './components/Dashboard';
 import Threats from './components/Threats';
-import ThreatAlert, { type ThreatData } from './components/ThreatAlert';
+import BlockNotices, { addRefusals, type NoticeGroup } from './components/BlockNotices';
+import type { RefusalEvent } from './lib/refusals';
 import Sessions from './components/Sessions';
 import Skills from './components/Skills';
 import ProvenanceGraph from './components/ProvenanceGraph';
@@ -22,8 +23,7 @@ export type Page =
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
-  const [threatAlertOpen, setThreatAlertOpen] = useState(false);
-  const [currentThreat, setCurrentThreat] = useState<ThreatData | null>(null);
+  const [notices, setNotices] = useState<NoticeGroup[]>([]);
   const { fetchStatus, fetchSkills, fetchEvents, initEventListener, events } = useStore();
   // Track which threat IDs we've already shown alerts for. Persisted to
   // localStorage so a dismissed alert does NOT re-fire every time the app is
@@ -59,18 +59,14 @@ export default function App() {
     };
   }, [fetchStatus, fetchSkills, fetchEvents]);
 
-  // Auto-show threat alert on blocked events (only for new ones)
+  // A notice for each new refusal. Everything already in the feed when the
+  // app opens counts as seen, so old refusals do not replay.
   const threatsSeeded = useRef(false);
   useEffect(() => {
-    // First populated load: treat everything already in the feed as "seen" so
-    // pre-existing threats don't replay as live popups when the app opens. Only
-    // events that arrive AFTER startup raise an alert.
-    if (!threatsSeeded.current) {
-      if (events.length === 0) return;
-      threatsSeeded.current = true;
+    const remember = (ids: string[]) =>
       setShownThreatIds((prev) => {
         const next = new Set(prev);
-        events.forEach((e) => next.add(e.id));
+        ids.forEach((id) => next.add(id));
         try {
           localStorage.setItem('rz_shown_threat_ids', JSON.stringify([...next].slice(-500)));
         } catch {
@@ -78,107 +74,17 @@ export default function App() {
         }
         return next;
       });
+    if (!threatsSeeded.current) {
+      if (events.length === 0) return;
+      threatsSeeded.current = true;
+      remember(events.map((e) => e.id));
       return;
     }
-
-    const lastEvent = events[0];
-    if (lastEvent && !lastEvent.allowed && !shownThreatIds.has(lastEvent.id)) {
-      const sensitivePatterns = [
-        'credentials',
-        'id_rsa',
-        'id_ed25519',
-        '.env',
-        'secret',
-        'token',
-        'passwd',
-      ];
-      const isSensitiveFile = sensitivePatterns.some((p) =>
-        lastEvent.target?.toLowerCase().includes(p),
-      );
-      const isNetworkBlock = lastEvent.type?.includes('Network');
-      const isDlpBlock = lastEvent.type?.startsWith('dlp_') || lastEvent.type?.startsWith('proxy_');
-
-      const markShown = () =>
-        setShownThreatIds((prev) => {
-          const next = new Set(prev).add(lastEvent.id);
-          // Persist (cap to the most recent 500 ids so it can't grow unbounded).
-          try {
-            const ids = [...next].slice(-500);
-            localStorage.setItem('rz_shown_threat_ids', JSON.stringify(ids));
-          } catch {
-            /* storage unavailable — non-fatal */
-          }
-          return next;
-        });
-
-      if (isSensitiveFile) {
-        const threat = {
-          id: lastEvent.id,
-          title: 'Credential Access Attempt Blocked',
-          description: 'An AI agent attempted to access sensitive credentials.',
-          severity: 'critical' as const,
-          confidence: 94,
-          source: lastEvent.skill_name || 'Unknown',
-          skillName: lastEvent.skill_name || 'unknown-skill',
-          timeline: [
-            {
-              time: new Date(lastEvent.timestamp).toLocaleTimeString(),
-              action: lastEvent.type || 'File Access',
-              target: lastEvent.target,
-              status: 'blocked' as const,
-            },
-          ],
-          aiAnalysis: `Blocked attempt to access sensitive file: ${lastEvent.target}. This type of access is commonly associated with credential theft attempts (MAESTRO: LM-003, DO-001). The operation was blocked at the kernel level before the file could be read.`,
-        };
-        setCurrentThreat(threat);
-        setThreatAlertOpen(true);
-        markShown();
-      } else if (isNetworkBlock) {
-        const threat = {
-          id: lastEvent.id,
-          title: 'Data Exfiltration Attempt Blocked',
-          description: `An AI agent attempted to connect to an unauthorized server: ${lastEvent.target}`,
-          severity: 'critical' as const,
-          confidence: 91,
-          source: lastEvent.skill_name || 'Unknown',
-          skillName: lastEvent.skill_name || 'unknown-skill',
-          timeline: [
-            {
-              time: new Date(lastEvent.timestamp).toLocaleTimeString(),
-              action: 'Network Connect',
-              target: lastEvent.target,
-              status: 'blocked' as const,
-            },
-          ],
-          aiAnalysis: `Blocked outbound connection to ${lastEvent.target}. A tainted process attempted to exfiltrate data (MAESTRO: DO-002, EX-001).`,
-        };
-        setCurrentThreat(threat);
-        setThreatAlertOpen(true);
-        markShown();
-      } else if (isDlpBlock) {
-        const threat = {
-          id: lastEvent.id,
-          title: 'API Key Exfiltration Blocked',
-          description: `DLP detected API key(s) being sent to unauthorized destination: ${lastEvent.target}`,
-          severity: 'critical' as const,
-          confidence: 97,
-          source: lastEvent.skill_name || 'Unknown',
-          skillName: lastEvent.skill_name || 'unknown-skill',
-          timeline: [
-            {
-              time: new Date(lastEvent.timestamp).toLocaleTimeString(),
-              action: 'Content Inspection',
-              target: lastEvent.target,
-              status: 'blocked' as const,
-            },
-          ],
-          aiAnalysis: `DLP content inspection detected API key(s) in outbound traffic to ${lastEvent.target} (MAESTRO: EX-001, EX-002).`,
-        };
-        setCurrentThreat(threat);
-        setThreatAlertOpen(true);
-        markShown();
-      }
-    }
+    const fresh = events.filter((e) => !e.allowed && !shownThreatIds.has(e.id));
+    if (fresh.length === 0) return;
+    // The feed is newest first; notices read oldest first.
+    setNotices((g) => addRefusals(g, [...fresh].reverse() as unknown as RefusalEvent[]));
+    remember(fresh.map((e) => e.id));
   }, [events, shownThreatIds]);
 
   const renderPage = () => {
@@ -215,16 +121,10 @@ export default function App() {
           </div>
         </div>
 
-        <ThreatAlert
-          isOpen={threatAlertOpen}
-          onClose={() => setThreatAlertOpen(false)}
-          threat={currentThreat}
-          onInvestigate={() => {
-            setThreatAlertOpen(false);
-            setCurrentPage('threats');
-          }}
-          onBlockOnce={() => setThreatAlertOpen(false)}
-          onAllow={() => setThreatAlertOpen(false)}
+        <BlockNotices
+          groups={notices}
+          onDismiss={(key) => setNotices((g) => g.filter((x) => x.key !== key))}
+          onNavigate={(page) => setCurrentPage(page)}
         />
 
         <CommentaryCaptions />
