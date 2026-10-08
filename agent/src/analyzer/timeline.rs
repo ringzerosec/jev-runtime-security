@@ -175,6 +175,8 @@ impl Timeline {
         if Self::is_noise_event(event) {
             return Ok(());
         }
+        // Live commentary hears every event that is kept.
+        crate::narrator::NARRATOR.observe(event);
 
         // Push into the per-PID in-memory ring BEFORE we touch sled, so a
         // sled write failure still gives the hot-path `recent()` lookups a

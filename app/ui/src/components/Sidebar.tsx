@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { CommentarySwitch } from './LiveCommentary';
 import { useStore } from '../store';
 import icon from '../ringzero-icon.svg';
 import logo from '../ringzero-logo.svg';
@@ -87,6 +88,7 @@ export default function Sidebar({ currentPage, onNavigate }: SidebarProps) {
           })}
         </ul>
       </nav>
+      <CommentarySwitch />
     </aside>
   );
 }

@@ -15,6 +15,7 @@ mod fscache;
 mod health;
 mod integrations;
 mod ipc;
+mod narrator;
 mod platform;
 mod policy;
 mod review;

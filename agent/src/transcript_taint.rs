@@ -285,6 +285,12 @@ async fn drain_transcript(ctx: &WatchContext, path: &Path, tails: &mut HashMap<P
         if let Some(prov) = record_signal(line) {
             signals.push(prov);
         }
+        // Live commentary: what the agent is thinking and saying mid-turn.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            let p = path.to_string_lossy();
+            let agent = if p.contains("/.codex/") { "codex" } else if p.contains("/.gemini/") { "gemini" } else { "claude" };
+            crate::narrator::NARRATOR.observe_transcript(agent, &v);
+        }
     }
     for prov in signals {
         on_external_ingestion(ctx, path, prov).await;

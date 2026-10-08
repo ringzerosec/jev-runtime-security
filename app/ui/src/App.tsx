@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import { CommentaryCaptions } from './components/LiveCommentary';
+import { startCommentaryLoop } from './lib/commentary';
 import { useState, useEffect, useRef } from 'react';
 import { useStore } from './store';
 import { ThemeProvider } from './hooks/use-theme';
@@ -38,6 +40,9 @@ export default function App() {
   useEffect(() => {
     initEventListener();
   }, [initEventListener]);
+
+  // Live commentary: fetch and speak while it is switched on.
+  useEffect(() => startCommentaryLoop(), []);
 
   useEffect(() => {
     fetchStatus();
@@ -222,6 +227,7 @@ export default function App() {
           onAllow={() => setThreatAlertOpen(false)}
         />
 
+        <CommentaryCaptions />
         <ToastContainer />
       </TooltipProvider>
     </ThemeProvider>

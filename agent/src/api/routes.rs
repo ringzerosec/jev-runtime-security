@@ -127,6 +127,7 @@ pub fn make_router(state: ApiState) -> Router {
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/webhooks/stats", get(get_webhook_stats))
         .route("/api/v1/events", get(get_events))
+        .route("/api/v1/commentary", get(get_commentary))
         .route("/api/v1/threats", get(get_threats))
         .route("/api/v1/policy", get(get_policy).post(update_policy))
         .route("/api/v1/intent-diffs", get(get_intent_diffs))
@@ -565,6 +566,27 @@ async fn get_events(
         )
             .into_response(),
     }
+}
+
+#[derive(Deserialize)]
+struct CommentaryQuery {
+    /// Return lines newer than this sequence number.
+    #[serde(default)]
+    after: u64,
+    /// Wait up to this many seconds for a new line (long poll). Capped at 6.
+    #[serde(default)]
+    wait: u64,
+}
+
+/// GET /api/v1/commentary?after=N&wait=5 — live commentary lines.
+async fn get_commentary(Query(q): Query<CommentaryQuery>) -> impl IntoResponse {
+    let wait = std::time::Duration::from_secs(q.wait.min(6));
+    let (lines, last) = if wait.is_zero() {
+        crate::narrator::NARRATOR.since(q.after)
+    } else {
+        crate::narrator::NARRATOR.wait(q.after, wait).await
+    };
+    Json(serde_json::json!({ "lines": lines, "last": last }))
 }
 
 async fn get_threats(State(state): State<ApiState>) -> impl IntoResponse {
