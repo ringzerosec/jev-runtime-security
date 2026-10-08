@@ -1007,6 +1007,19 @@ async fn async_main() -> Result<()> {
                     allowed = ev.allowed, "Kernel event received"
                 );
 
+                // A thread's name is not its process's: Bun and Node agents do
+                // their work on threads named "HTTP Client" or "Bun Pool 0".
+                // When the thread name is not an agent's, take the process's
+                // own name, so the event is attributed to the agent it belongs to.
+                if !common::agent_detect::is_ai_agent(&ev.process) {
+                    if let Ok(c) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+                        let c = c.trim();
+                        if common::agent_detect::is_ai_agent(c) {
+                            ev.process = c.to_string();
+                        }
+                    }
+                }
+
                 // Kernel → session wiring:
                 // Find the session for this event by PID or process name,
                 // register the PID, and increment event counter.

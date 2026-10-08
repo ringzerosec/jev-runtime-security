@@ -6,7 +6,7 @@
 // `observe_transcript`. Most produce nothing. The ones a person would want to
 // hear about become one short line: what the agent was asked, what it is
 // thinking, which files it reads and writes, what it runs, and above all what
-// Ring Zero refused.
+// Ring Zero Security refused.
 //
 // The app reads the lines over GET /api/v1/commentary, shows them as captions
 // and speaks them. Each line has a level so the speaker can choose: an `Alert`
@@ -33,7 +33,7 @@ pub enum Level {
     Info,
     /// Worth hearing: a sensitive read, something outside the agent's limits.
     Notice,
-    /// Ring Zero refused something. Always spoken, interrupts.
+    /// Ring Zero Security refused something. Always spoken, interrupts.
     Alert,
 }
 
@@ -51,6 +51,15 @@ pub struct Line {
 }
 
 const KEEP: usize = 200;
+/// Programs too routine to mention: shells and text plumbing an agent runs
+/// constantly. Saying them would drown out everything else.
+const QUIET_PROGRAMS: &[&str] = &[
+    "sh", "bash", "dash", "zsh", "fish", "env", "which", "uname", "cat", "ls", "head", "tail", "sed",
+    "awk", "gawk", "grep", "rg", "find", "fd", "wc", "sort", "uniq", "tr", "cut", "dirname", "basename",
+    "readlink", "realpath", "stat", "date", "id", "whoami", "true", "false", "test", "[", "printf",
+    "echo", "tee", "xargs", "mkdir", "touch", "file", "less", "more", "tput", "stty", "locale", "ps",
+    "pgrep", "sleep", "nproc", "getconf", "hostname", "pwd", "diff", "cmp", "sha256sum", "md5sum",
+];
 /// The same sentence is not repeated within this window.
 const REPEAT_WINDOW: Duration = Duration::from_secs(20);
 /// Reads are gathered and told as one line after this much quiet.
@@ -186,9 +195,9 @@ impl Narrator {
                 self.flush_reads(&mut st);
                 if ev.target.ends_with(":prompt-secret") {
                     let (level, text) = if ev.allowed {
-                        (Level::Notice, "There's a secret in that prompt. Ring Zero masked it in the record.".to_string())
+                        (Level::Notice, "There's a secret in that prompt. Ring Zero Security masked it in the record.".to_string())
                     } else {
-                        (Level::Alert, "That prompt had a secret in it. Ring Zero stopped it before it left this machine.".to_string())
+                        (Level::Alert, "That prompt had a secret in it. Ring Zero Security stopped it before it left this machine.".to_string())
                     };
                     self.push(&mut st, level, &agent, "blocked", text);
                     return;
@@ -214,7 +223,7 @@ impl Narrator {
                         .and_then(|d| d.get("rule"))
                         .and_then(|r| r.as_str())
                         .unwrap_or("it broke a rule");
-                    self.push(&mut st, Level::Alert, &agent, "blocked", format!("Ring Zero refused that {} call: {}.", ev.target, rule));
+                    self.push(&mut st, Level::Alert, &agent, "blocked", format!("Ring Zero Security refused that {} call: {}.", ev.target, rule));
                     return;
                 }
                 // Narrate the intent, not the result: PreToolUse only.
@@ -282,12 +291,26 @@ impl Narrator {
     }
 
     fn narrate_kernel(&self, st: &mut State, agent: &str, ev: &SecurityEvent) {
+        // A kernel event names the process that made the call (cat, curl).
+        // Speak about the agent it belongs to instead.
+        let owned;
+        let agent = if is_known_agent(agent) {
+            agent
+        } else {
+            owned = ev
+                .parent_process
+                .as_deref()
+                .map(agent_name)
+                .filter(|a| is_known_agent(a))
+                .unwrap_or_else(|| "The agent".to_string());
+            owned.as_str()
+        };
         let name = base_name(&ev.target);
         let lower = name.to_ascii_lowercase();
 
         if ev.target.starts_with("TAMPER:") {
             self.flush_reads(st);
-            self.push(st, Level::Alert, "Ring Zero", "blocked", "Something tried to stop or inspect Ring Zero itself. Refused.".into());
+            self.push(st, Level::Alert, "Ring Zero Security", "blocked", "Something tried to stop or inspect Ring Zero Security itself. Refused.".into());
             return;
         }
 
@@ -297,8 +320,8 @@ impl Narrator {
                 EventKind::ProcessExec => {
                     let prog = lower.split_whitespace().next().unwrap_or("").to_string();
                     match prog.as_str() {
-                        "sudo" | "su" | "pkexec" | "doas" | "run0" => format!("{agent} just tried to become an administrator with {prog}. Ring Zero refused."),
-                        "systemd-run" | "at" | "batch" | "crontab" => format!("{agent} tried to slip work out of its own process with {prog}. Ring Zero refused."),
+                        "sudo" | "su" | "pkexec" | "doas" | "run0" => format!("{agent} just tried to become an administrator with {prog}. Ring Zero Security refused."),
+                        "systemd-run" | "at" | "batch" | "crontab" => format!("{agent} tried to slip work out of its own process with {prog}. Ring Zero Security refused."),
                         _ => format!("{agent} tried to run {prog}, which isn't on its approved list. Blocked."),
                     }
                 }
@@ -307,7 +330,7 @@ impl Narrator {
                     format!("{agent} tried to connect to {host}, which isn't approved. Blocked.")
                 }
                 _ => match describe_protected(&lower, &ev.kind) {
-                    Some(t) => format!("{agent} just tried to {t}. Blocked by Ring Zero."),
+                    Some(t) => format!("{agent} just tried to {t}. Blocked by Ring Zero Security."),
                     None => format!("{agent} tried to touch {name}, which is protected. Blocked."),
                 },
             };
@@ -315,11 +338,41 @@ impl Narrator {
             return;
         }
 
+        // Any agent, from what the kernel saw: first say it is working, then
+        // the programs it runs and the files it saves. This is what makes the
+        // commentary work for agents without hooks or a transcript we read.
+        if is_known_agent(agent) && agent != "Claude Code" {
+            let key = format!("kernel:{agent}");
+            let now = Instant::now();
+            if !st.sessions_seen.get(&key).is_some_and(|t| now.duration_since(*t) < Duration::from_secs(1800)) {
+                st.sessions_seen.insert(key, now);
+                self.push(st, Level::Info, agent, "start", format!("{agent} is at work."));
+            }
+        }
+        // Claude Code reports its own commands and edits through hooks, which
+        // say more; the kernel lines would only repeat them.
+        if is_known_agent(agent) && agent != "Claude Code" {
+            match ev.kind {
+                EventKind::ProcessExec => {
+                    let prog = lower.split_whitespace().next().unwrap_or("").to_string();
+                    if !prog.is_empty() && !QUIET_PROGRAMS.contains(&prog.as_str()) && !is_known_agent(&agent_name(&prog)) {
+                        self.flush_reads(st);
+                        self.push(st, Level::Info, agent, "run", format!("{agent} is running {prog}."));
+                    }
+                }
+                EventKind::FileWrite if ev.reason.as_deref().is_some_and(|r| r.starts_with("agent-written file")) => {
+                    self.flush_reads(st);
+                    self.push(st, Level::Info, agent, "write", format!("{agent} saved {name}."));
+                }
+                _ => {}
+            }
+        }
+
         // Allowed, but worth hearing.
         if let Some(r) = ev.reason.as_deref() {
             if let Some(rest) = r.strip_prefix("Outside limits (watching) — ") {
                 let what = rest.split_once(": ").map(|(_, d)| d).unwrap_or(rest);
-                self.push(st, Level::Notice, agent, "watching", format!("Heads up: it {what}. Ring Zero is only watching this one, so it went through."));
+                self.push(st, Level::Notice, agent, "watching", format!("Heads up: it {what}. Ring Zero Security is only watching this one, so it went through."));
                 return;
             }
         }
@@ -374,7 +427,7 @@ fn describe_protected(name: &str, kind: &EventKind) -> Option<String> {
     } else if name == "credentials" || name == ".git-credentials" || name == ".netrc" || name == ".npmrc" || name == ".pypirc" {
         "your saved credentials"
     } else if name == "api-token" || name == "daemon.toml" || name == "profiles.json" || name.starts_with("ringzero") || name == "settings.json" {
-        return Some(format!("{verb} Ring Zero's own settings. That's tampering"));
+        return Some(format!("{verb} Ring Zero Security's own settings. That's tampering"));
     } else if matches!(name, "claude.md" | "agents.md" | "gemini.md" | ".cursorrules" | ".windsurfrules" | "skill.md" | ".mcp.json" | "claude.local.md") {
         return Some(format!("{verb} its own instructions in {name}"));
     } else {
@@ -421,12 +474,29 @@ fn agent_name(process: &str) -> String {
         "Cursor"
     } else if p.starts_with("copilot") {
         "Copilot"
+    } else if p.starts_with("opencode") {
+        "opencode"
+    } else if p.starts_with("aider") {
+        "Aider"
+    } else if p.starts_with("windsurf") {
+        "Windsurf"
+    } else if p.starts_with("devin") {
+        "Devin"
+    } else if p.starts_with("chatgpt") {
+        "ChatGPT"
     } else if p.is_empty() || p == "unknown" {
         "The agent"
     } else {
         return process.to_string();
     };
     n.to_string()
+}
+
+fn is_known_agent(name: &str) -> bool {
+    matches!(
+        name,
+        "Claude Code" | "Codex" | "Gemini" | "Cursor" | "Copilot" | "opencode" | "Aider" | "Windsurf" | "Devin" | "ChatGPT"
+    )
 }
 
 fn base_name(path: &str) -> String {
@@ -549,7 +619,7 @@ mod tests {
     fn blocked_secret_read_is_an_alert() {
         let n = fresh();
         n.observe(&ev(EventKind::FileOpen, "Claude Code", "id_rsa", false));
-        assert_eq!(texts(&n), vec![(Level::Alert, "Claude Code just tried to read your SSH key. Blocked by Ring Zero.".into())]);
+        assert_eq!(texts(&n), vec![(Level::Alert, "Claude Code just tried to read your SSH key. Blocked by Ring Zero Security.".into())]);
     }
 
     #[test]
@@ -634,6 +704,33 @@ mod tests {
         let t = texts(&n);
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].1, "Thinking: The login bug is probably in the session refresh.");
+    }
+
+    #[test]
+    fn helper_programs_are_spoken_as_the_agent() {
+        let n = fresh();
+        n.observe(&ev(EventKind::FileOpen, "cat", ".env", false));
+        let mut e = ev(EventKind::FileOpen, "head", "id_rsa", false);
+        e.parent_process = Some("claude".into());
+        n.observe(&e);
+        let t = texts(&n);
+        assert!(t[0].1.starts_with("The agent just tried to read a .env file"), "{}", t[0].1);
+        assert!(t[1].1.starts_with("Claude Code just tried to read your SSH key"), "{}", t[1].1);
+        assert!(t.iter().all(|(_, x)| x.contains("Ring Zero Security")));
+    }
+
+    #[test]
+    fn any_agent_is_narrated_from_the_kernel() {
+        let n = fresh();
+        let mut e = ev(EventKind::ProcessExec, "opencode.exe", "/usr/bin/git", true);
+        n.observe(&e);
+        e.target = "/usr/bin/ls".into();
+        n.observe(&e);
+        let mut w = ev(EventKind::FileWrite, "opencode", "/home/u/app/login.ts", true);
+        w.reason = Some("agent-written file scanned at close: Clean".into());
+        n.observe(&w);
+        let t: Vec<String> = texts(&n).into_iter().map(|x| x.1).collect();
+        assert_eq!(t, vec!["opencode is at work.", "opencode is running git.", "opencode saved login.ts."]);
     }
 
     #[test]

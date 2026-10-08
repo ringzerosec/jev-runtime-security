@@ -172,6 +172,10 @@ pub fn classify_agent(process_name: &str) -> &'static str {
         "aider"
     } else if p.contains("windsurf") {
         "windsurf"
+    } else if p.starts_with("opencode") {
+        "opencode"
+    } else if p.starts_with("agy") || p.contains("antigravity") {
+        "antigravity"
     } else if p.contains("cody") {
         "cody"
     } else if p.contains("tabnine") {

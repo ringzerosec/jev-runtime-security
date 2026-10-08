@@ -141,6 +141,11 @@ export function startCommentaryLoop(): () => void {
           'GET',
           `/api/v1/commentary?after=${after}&wait=5`,
         );
+        // The daemon restarted and its numbering began again: start over.
+        if (r.last < after) {
+          after = 0;
+          continue;
+        }
         after = Math.max(after, r.last);
         if (r.lines.length && useCommentary.getState().enabled) {
           useCommentary.setState((s) => ({ lines: [...s.lines, ...r.lines].slice(-6) }));
