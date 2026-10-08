@@ -79,7 +79,7 @@ export function CommentaryCaptions() {
 export function CommentarySwitch() {
   const { enabled, voice, engine, setEnabled, setVoice } = useCommentary();
   const voiceText =
-    engine === 'piper' || engine === 'espeak'
+    engine === 'kokoro' || engine === 'piper' || engine === 'espeak'
       ? 'Voice runs on this machine'
       : engine === 'browser'
         ? "Uses this browser's voice"

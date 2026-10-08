@@ -43,7 +43,7 @@ function save(key: string, v: boolean) {
 interface CommentaryState {
   enabled: boolean;
   voice: boolean;
-  engine: 'piper' | 'espeak' | 'browser' | 'none' | 'unknown';
+  engine: 'kokoro' | 'piper' | 'espeak' | 'browser' | 'none' | 'unknown';
   lines: CommentaryLine[];
   setEnabled: (v: boolean) => void;
   setVoice: (v: boolean) => void;
