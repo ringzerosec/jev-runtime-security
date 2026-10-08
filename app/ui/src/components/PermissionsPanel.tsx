@@ -47,7 +47,7 @@ function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boolean) =
       onClick={() => onChange(!on)}
       className={cn(
         'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
-        on ? 'bg-primary' : 'bg-muted-foreground/30',
+        on ? 'bg-amber-500' : 'bg-muted-foreground/30',
       )}
     >
       <span className={cn('inline-block h-4 w-4 rounded-full bg-white shadow transition-transform', on ? 'translate-x-4' : 'translate-x-0.5')} />
@@ -91,17 +91,48 @@ function ListEditor({ items, onChange, placeholder }: { items: string[]; onChang
   );
 }
 
+// Every switch here means the same thing: ON limits it. A limit is either an
+// approved list or "none at all" when the list is empty. OFF means anything.
+// The lists are kept while a switch is off, so turning it back on restores them.
+const kept = new Map<string, { hosts?: string[]; programs?: string[] }>();
+
 function Row({ p, onChange }: { p: Profile; onChange: (p: Profile) => void }) {
   const [edit, setEdit] = useState(false);
+  const [showRecent, setShowRecent] = useState(false);
   const isAgent = p.kind === 'agent';
   const Icon = isAgent ? Bot : Plug;
-  const anyHost = p.allow_hosts.includes('*');
-  const restrictedHosts = isAgent ? !anyHost : true;
-  const networkOn = isAgent ? !anyHost : p.allow_hosts.length > 0;
+  const memo = kept.get(p.name) ?? {};
+
+  // Network: limited unless "*" (any host) is in the list.
+  const netLimited = !p.allow_hosts.includes('*');
+  const hosts = p.allow_hosts.filter((h) => h !== '*');
+  const setNet = (limit: boolean) => {
+    if (limit) {
+      onChange({ ...p, allow_hosts: memo.hosts ?? [] });
+    } else {
+      kept.set(p.name, { ...memo, hosts });
+      onChange({ ...p, allow_hosts: ['*'] });
+    }
+  };
+
+  // Programs: limited when it may not start any, or only approved ones.
+  const progLimited = !p.allow_spawn || p.allow_programs.length > 0;
+  const setProg = (limit: boolean) => {
+    if (limit) {
+      const list = memo.programs ?? [];
+      onChange({ ...p, allow_spawn: list.length > 0, allow_programs: list });
+    } else {
+      kept.set(p.name, { ...memo, programs: p.allow_programs });
+      onChange({ ...p, allow_spawn: true, allow_programs: [] });
+    }
+  };
+
+  const netText = !netLimited ? 'Any host' : hosts.length ? 'Approved hosts only' : 'No network';
+  const progText = !progLimited ? 'Any program' : p.allow_programs.length ? 'Approved programs only' : 'No programs';
 
   return (
     <div className="border-b last:border-b-0">
-      <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_88px] items-center gap-4 px-5 py-3.5">
+      <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_96px] items-center gap-4 px-5 py-3.5">
         <div className="flex items-center gap-3 min-w-0">
           <div className="p-2 rounded-lg bg-muted shrink-0"><Icon className="h-4 w-4" /></div>
           <div className="min-w-0">
@@ -110,62 +141,75 @@ function Row({ p, onChange }: { p: Profile; onChange: (p: Profile) => void }) {
           </div>
         </div>
 
-        {/* Network */}
         <div className="flex items-center gap-2.5">
-          {isAgent ? (
-            <>
-              <Switch on={restrictedHosts} label={`${p.name}: approved hosts only`} onChange={(v) => onChange({ ...p, allow_hosts: v ? p.allow_hosts.filter((h) => h !== '*') : ['*'] })} />
-              <div className="text-xs leading-tight">
-                <div className="font-medium">{restrictedHosts ? 'Approved hosts only' : 'Any host'}</div>
-                {restrictedHosts && <div className="text-muted-foreground">{p.allow_hosts.length} approved</div>}
-              </div>
-            </>
-          ) : (
-            <>
-              <Switch on={networkOn} label={`${p.name}: network access`} onChange={(v) => onChange({ ...p, allow_hosts: v ? ['*'] : [] })} />
-              <div className="text-xs font-medium">{networkOn ? 'Network allowed' : 'No network'}</div>
-            </>
-          )}
-        </div>
-
-        {/* Programs */}
-        <div className="flex items-center gap-2.5">
-          <Switch on={p.allow_spawn} label={`${p.name}: can start programs`} onChange={(v) => onChange({ ...p, allow_spawn: v })} />
+          <Switch on={netLimited} label={`${p.name}: limit network`} onChange={setNet} />
           <div className="text-xs leading-tight">
-            <div className="font-medium">{!p.allow_spawn ? 'Cannot start programs' : p.allow_programs.length ? 'Approved programs only' : 'Any program'}</div>
-            {p.allow_spawn && p.allow_programs.length > 0 && <div className="text-muted-foreground">{p.allow_programs.length} approved</div>}
+            <div className="font-medium">{netText}</div>
+            {netLimited && hosts.length > 0 && <div className="text-muted-foreground">{hosts.length} approved</div>}
           </div>
         </div>
 
-        {/* Would block */}
-        <div className="text-right">
+        <div className="flex items-center gap-2.5">
+          <Switch on={progLimited} label={`${p.name}: limit programs`} onChange={setProg} />
+          <div className="text-xs leading-tight">
+            <div className="font-medium">{progText}</div>
+            {progLimited && p.allow_programs.length > 0 && (
+              <div className="text-muted-foreground">{p.allow_programs.length} approved</div>
+            )}
+          </div>
+        </div>
+
+        <button
+          onClick={() => p.recent.length > 0 && setShowRecent((v) => !v)}
+          disabled={p.recent.length === 0}
+          className="text-right disabled:cursor-default"
+          aria-label={`${p.stats.would_block} times outside the limits; show them`}
+        >
           <div className={cn('text-xl font-semibold tabular-nums leading-none', p.stats.would_block ? 'text-amber-500' : 'text-muted-foreground/50')}>
             {p.stats.would_block}
           </div>
-          <div className="text-[10px] text-muted-foreground mt-1">would block</div>
-        </div>
+          <div className={cn('text-[10px] mt-1', p.recent.length ? 'text-primary hover:underline' : 'text-muted-foreground')}>
+            {p.stats.would_block === 1 ? 'time' : 'times'}
+          </div>
+        </button>
       </div>
 
-      {/* Lists behind the switches */}
-      {isAgent && (restrictedHosts || p.allow_spawn) && (
+      {(netLimited || progLimited) && (
         <button onClick={() => setEdit((e) => !e)} className="flex items-center gap-1 px-5 pb-2.5 -mt-1 text-[11px] text-primary hover:underline">
           {edit ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-          Edit approved hosts and programs
+          Edit approved {netLimited && progLimited ? 'hosts and programs' : netLimited ? 'hosts' : 'programs'}
         </button>
+      )}
+      {showRecent && (
+        <div className="px-5 pb-3 space-y-1">
+          <div className="text-[11px] font-medium text-muted-foreground mb-1">Latest outside the limits (recorded, not refused)</div>
+          {p.recent.map((v, i) => (
+            <div key={i} className="text-xs flex gap-2">
+              <span className="text-muted-foreground tabular-nums shrink-0">{new Date(v.at).toLocaleTimeString()}</span>
+              <span className="font-mono">{v.process}</span>
+              <span className="text-muted-foreground">{v.detail}</span>
+            </div>
+          ))}
+        </div>
       )}
       {edit && (
         <div className="grid md:grid-cols-2 gap-5 px-5 pb-4">
-          {restrictedHosts && (
+          {netLimited && (
             <div>
               <div className="flex items-center gap-1.5 text-xs font-medium mb-2"><Globe className="h-3.5 w-3.5" /> Approved hosts</div>
-              <ListEditor items={p.allow_hosts} onChange={(v) => onChange({ ...p, allow_hosts: v })} placeholder="10.0.0.0/24, 10.0.0.5, api.example.com" />
-              <p className="text-[11px] text-muted-foreground mt-1.5">IPs and ranges are exact. Host names are matched by looking them up every 5 minutes; wildcards are not reliable yet.</p>
+              <ListEditor items={hosts} onChange={(v) => onChange({ ...p, allow_hosts: v })} placeholder="10.0.0.0/24, 10.0.0.5, api.example.com" />
+              <p className="text-[11px] text-muted-foreground mt-1.5">Empty means no network at all. IPs and ranges are exact; host names are looked up every 5 minutes.</p>
             </div>
           )}
-          {p.allow_spawn && (
+          {progLimited && (
             <div>
-              <div className="flex items-center gap-1.5 text-xs font-medium mb-2"><Terminal className="h-3.5 w-3.5" /> Approved programs <span className="font-normal text-muted-foreground">(empty = any)</span></div>
-              <ListEditor items={p.allow_programs} onChange={(v) => onChange({ ...p, allow_programs: v })} placeholder="git" />
+              <div className="flex items-center gap-1.5 text-xs font-medium mb-2"><Terminal className="h-3.5 w-3.5" /> Approved programs</div>
+              <ListEditor
+                items={p.allow_programs}
+                onChange={(v) => onChange({ ...p, allow_spawn: v.length > 0, allow_programs: v })}
+                placeholder="git"
+              />
+              <p className="text-[11px] text-muted-foreground mt-1.5">Empty means it may not start any program.</p>
             </div>
           )}
         </div>
@@ -220,11 +264,16 @@ export default function PermissionsPanel({ profiles, onSaved }: { profiles: Prof
 
   return (
     <div className="rounded-xl border bg-card overflow-hidden">
-      <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_88px] gap-4 px-5 py-2 border-b bg-muted/30 text-[11px] uppercase tracking-wider text-muted-foreground">
+      <div className="px-5 py-2.5 border-b text-xs text-muted-foreground">
+        A switch that is on limits that agent to its approved list. These limits are watched, not
+        enforced yet: anything outside them is recorded and counted, never refused. Counts start
+        when Ring Zero starts.
+      </div>
+      <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_96px] gap-4 px-5 py-2 border-b bg-muted/30 text-[11px] uppercase tracking-wider text-muted-foreground">
         <span>Agent / MCP server</span>
-        <span className="flex items-center gap-1"><Globe className="h-3 w-3" /> Network</span>
-        <span className="flex items-center gap-1"><Terminal className="h-3 w-3" /> Programs</span>
-        <span className="text-right">Activity</span>
+        <span className="flex items-center gap-1"><Globe className="h-3 w-3" /> Limit network</span>
+        <span className="flex items-center gap-1"><Terminal className="h-3 w-3" /> Limit programs</span>
+        <span className="text-right">Outside limits</span>
       </div>
       {agents.map((p) => <Row key={p.name} p={p} onChange={update} />)}
       {mcps.length > 0 && <div className="px-5 py-1.5 border-b bg-muted/20 text-[11px] text-muted-foreground">MCP servers</div>}

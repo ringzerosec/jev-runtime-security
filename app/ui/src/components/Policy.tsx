@@ -398,7 +398,7 @@ export default function Policy() {
           question="What may each agent and MCP server do?"
           right={
             <Badge variant="outline" className="gap-1 border-amber-500/30 text-amber-500">
-              <Eye className="h-3 w-3" /> Detect only — nothing is blocked yet
+              <Eye className="h-3 w-3" /> Watching only
             </Badge>
           }
         />
