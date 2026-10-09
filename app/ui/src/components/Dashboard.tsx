@@ -99,12 +99,13 @@ interface PolicyPosture {
     admin_tools: boolean;
     escape_tools: boolean;
     instruction_files: boolean;
+    package_installs?: boolean;
     quarantine: boolean;
   };
 }
 
 export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) => void }) {
-  const { events, daemonConnected, status, fetchStatus, skills } = useStore();
+  const { events, refusals, daemonConnected, status, fetchStatus, skills } = useStore();
   // What the kernel is set to refuse, from the same endpoint Policy reads.
   const [posture, setPosture] = useState<PolicyPosture | null>(null);
   useEffect(() => {
@@ -171,7 +172,7 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
   const activeSessions = sessions.filter(
     (s) => s.state === 'ACTIVE' || s.state === 'PENDING' || s.state === 'WAITING_APPROVAL',
   );
-  const threatsDetected = events.filter((e) => !e.allowed).length;
+  const threatsDetected = refusals.length;
 
   // PROTECTION STATUS MUST REFLECT THE KERNEL, NOT A CONFIG FILE.
   //
@@ -204,6 +205,7 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
         'Protected data',
         pc.admin_tools && 'Admin tools',
         pc.escape_tools && 'Work outside the agent',
+        pc.package_installs && 'Package installs',
         pc.instruction_files && 'Changes to agent instructions',
         pc.quarantine && 'Flagged files',
         posture?.prompt_guard === 'block' && 'Secrets in prompts',
@@ -274,7 +276,7 @@ export default function Dashboard({ onNavigate }: { onNavigate?: (page: Page) =>
           icon={Lock}
         />
         <StatCard
-          label="Threats Detected"
+          label="Refused (24h)"
           value={threatsDetected}
           accent="text-event-block"
           icon={FileWarning}

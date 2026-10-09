@@ -4,7 +4,7 @@
 // Replaces the old modal. It does not cover the screen, groups refusals that
 // arrive together, says only what the record says (the agent, what it tried,
 // the control that refused it, the category a classifier gave it), and offers
-// only buttons that do something: open Threats, or open Policy to change the
+// only buttons that do something: open Security history, or open Policy to change the
 // rule (which asks for the administrator password as usual).
 
 import { useEffect, useState } from 'react';
@@ -59,7 +59,7 @@ function Notice({
   const n = group.events.length;
   const compact = commentary && !open;
 
-  // Leave on screen long enough to read, then go; Threats keeps the record.
+  // Leave on screen long enough to read, then go; Security history keeps the record.
   useEffect(() => {
     const t = setTimeout(onDismiss, compact ? 12000 : 20000);
     return () => clearTimeout(t);
@@ -135,7 +135,7 @@ function Notice({
             </button>
           )}
           <button onClick={onView} className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90">
-            View in Threats
+            View in Security history
           </button>
         </div>
       </div>

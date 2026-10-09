@@ -24,7 +24,7 @@ export type Page =
 export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
   const [notices, setNotices] = useState<NoticeGroup[]>([]);
-  const { fetchStatus, fetchSkills, fetchEvents, initEventListener, events } = useStore();
+  const { fetchStatus, fetchSkills, fetchEvents, initEventListener, refusals, refusalsLoaded } = useStore();
   // Track which threat IDs we've already shown alerts for. Persisted to
   // localStorage so a dismissed alert does NOT re-fire every time the app is
   // reopened (otherwise old/known threats keep popping up on each launch).
@@ -75,17 +75,17 @@ export default function App() {
         return next;
       });
     if (!threatsSeeded.current) {
-      if (events.length === 0) return;
+      if (!refusalsLoaded) return;
       threatsSeeded.current = true;
-      remember(events.map((e) => e.id));
+      remember(refusals.map((e) => e.id));
       return;
     }
-    const fresh = events.filter((e) => !e.allowed && !shownThreatIds.has(e.id));
+    const fresh = refusals.filter((e) => !shownThreatIds.has(e.id));
     if (fresh.length === 0) return;
     // The feed is newest first; notices read oldest first.
     setNotices((g) => addRefusals(g, [...fresh].reverse() as unknown as RefusalEvent[]));
     remember(fresh.map((e) => e.id));
-  }, [events, shownThreatIds]);
+  }, [refusals, refusalsLoaded, shownThreatIds]);
 
   const renderPage = () => {
     switch (currentPage) {
@@ -94,7 +94,7 @@ export default function App() {
       case 'sessions':
         return <Sessions />;
       case 'threats':
-        return <Threats />;
+        return <Threats onNavigate={setCurrentPage} />;
       case 'skills':
         return <Skills />;
       case 'graph':

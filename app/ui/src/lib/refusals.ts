@@ -74,6 +74,15 @@ export function describeRefusal(e: RefusalEvent): Refusal {
       changeable: true,
     };
   }
+  if (t.startsWith('PKG_INSTALL:')) {
+    const cmd = t.slice('PKG_INSTALL:'.length);
+    return {
+      sentence: `${agent} tried to install packages with ${cmd}. Refused: agents can't install packages.`,
+      what: cmd,
+      control: 'Agent controls · package installs',
+      changeable: true,
+    };
+  }
   if (t.endsWith(':prompt-secret')) {
     return {
       sentence: `A prompt to ${agent} had a secret in it. It was not sent.`,

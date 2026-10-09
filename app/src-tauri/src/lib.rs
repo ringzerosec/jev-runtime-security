@@ -318,8 +318,11 @@ fn http_json(
 
 /// Fetch + parse the event timeline over HTTP. `kind` is an optional
 /// comma-separated filter the HTTP endpoint understands.
-fn http_events(limit: u32, kind: Option<&str>) -> Vec<DaemonSecurityEvent> {
+fn http_events(limit: u32, kind: Option<&str>, blocked: bool) -> Vec<DaemonSecurityEvent> {
     let mut path = format!("/api/v1/events?limit={}", limit.min(1000));
+    if blocked {
+        path.push_str("&blocked=true");
+    }
     if let Some(k) = kind {
         // Event kinds are snake_case identifiers; refuse anything else so the
         // filter can't smuggle extra query parameters.
@@ -509,9 +512,9 @@ async fn daemon_health() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-async fn get_events(limit: Option<u32>, kind: Option<String>) -> Result<Vec<Event>, String> {
+async fn get_events(limit: Option<u32>, kind: Option<String>, blocked: Option<bool>) -> Result<Vec<Event>, String> {
     let limit = limit.unwrap_or(100);
-    let events = http_events(limit, kind.as_deref());
+    let events = http_events(limit, kind.as_deref(), blocked.unwrap_or(false));
     Ok(events.into_iter().map(to_tauri_event).collect())
 }
 

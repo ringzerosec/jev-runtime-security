@@ -18,7 +18,7 @@ import ProtectedData from './ProtectedData';
 import { runPrivilegedSequence, describeFailure } from '@/lib/privileged';
 import { toast } from './ui/toast';
 import PermissionsPanel, { type DiscoveredAgent } from './PermissionsPanel';
-import { Lock, Eye, MessageSquareLock, ShieldBan, LogOut, FileLock2, FileX2 } from 'lucide-react';
+import { Lock, Eye, MessageSquareLock, ShieldBan, LogOut, FileLock2, FileX2, PackageX } from 'lucide-react';
 
 interface Violation {
   profile: string;
@@ -53,11 +53,19 @@ interface Controls {
   admin_tools: boolean;
   escape_tools: boolean;
   instruction_files: boolean;
+  package_installs?: boolean;
   quarantine: boolean;
   write_scan: boolean;
-  lists: { admin_tools: string[]; escape_tools: string[]; instruction_files: string[] };
+  lists: { admin_tools: string[]; escape_tools: string[]; instruction_files: string[]; package_installs?: string[] };
 }
-type SettingKey = 'tamper_protection' | 'prompt_guard' | 'admin_tools' | 'escape_tools' | 'instruction_files' | 'quarantine';
+type SettingKey =
+  | 'tamper_protection'
+  | 'prompt_guard'
+  | 'admin_tools'
+  | 'escape_tools'
+  | 'instruction_files'
+  | 'package_installs'
+  | 'quarantine';
 
 function ToggleSwitch({ on, busy, label, onChange }: { on: boolean; busy?: boolean; label: string; onChange: (v: boolean) => void }) {
   return (
@@ -245,6 +253,7 @@ export default function Policy() {
         state.prompt_guard === 'off' && 'Secrets in prompts are not checked',
         state.controls?.admin_tools === false && 'Agents may run admin tools',
         state.controls?.escape_tools === false && 'Agents may start work outside their own process',
+        state.controls?.package_installs === false && 'Agents may install packages',
         state.mode !== 'enforce' && 'This machine is only watching; nothing is refused',
       ].filter(Boolean)
     : [];
@@ -254,8 +263,10 @@ export default function Policy() {
     (p) => p.network_mode === 'enforce' || p.programs_mode === 'enforce',
   ).length;
   const c = state?.controls;
-  const controlsTotal = 4;
-  const controlsOn = c ? [c.admin_tools, c.escape_tools, c.instruction_files, c.quarantine].filter(Boolean).length : 0;
+  const controlsTotal = 5;
+  const controlsOn = c
+    ? [c.admin_tools, c.escape_tools, c.package_installs, c.instruction_files, c.quarantine].filter(Boolean).length
+    : 0;
   const pg = PROMPT_GUARD_TEXT[state?.prompt_guard ?? 'warn'];
 
   return (
@@ -379,6 +390,16 @@ export default function Policy() {
             enforcing={enforcing}
             busy={applying === 'escape_tools'}
             onChange={(v) => applySetting('escape_tools', v ? 'on' : 'off')}
+          />
+          <ControlRow
+            icon={PackageX}
+            title="Agents can't install packages"
+            text="Package installs by an agent, or anything it starts, are refused before they download: npm install, npx, pip install, uv add, cargo install and the rest. npm test, npm run and pip list still work. If an agent needs a package, you install it."
+            items={c?.lists.package_installs}
+            on={!!c?.package_installs}
+            enforcing={enforcing}
+            busy={applying === 'package_installs'}
+            onChange={(v) => applySetting('package_installs', v ? 'on' : 'off')}
           />
           <ControlRow
             icon={FileLock2}
