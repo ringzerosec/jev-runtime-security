@@ -56,11 +56,59 @@ fn tokens(name: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Package managers. Never an agent by their own name or arguments: npm sets
+/// its process name and command line to "npm i openclaw@", so the package being
+/// installed would otherwise make npm look like the agent it installs. A package
+/// manager an agent starts is still in that agent's tree (the kernel inherits
+/// the tag at fork), so agent controls still apply to it.
+const PACKAGE_MANAGERS: &[&str] = &[
+    "npm",
+    "npx",
+    "pnpm",
+    "pnpx",
+    "yarn",
+    "bun",
+    "bunx",
+    "pip",
+    "pip3",
+    "pipx",
+    "uv",
+    "uvx",
+    "poetry",
+    "cargo",
+    "gem",
+    // The scripts a node interpreter runs for them (argv[1] of `node …`).
+    "npm-cli.js",
+    "npx-cli.js",
+    "yarn.js",
+    "pnpm.cjs",
+    "pnpm.mjs",
+];
+
+/// The program a process name or argv token names: its first word, without a
+/// directory. "npm i openclaw@" → "npm", "/usr/bin/pip3" → "pip3".
+fn program_word(name: &str) -> String {
+    let first = name.split_whitespace().next().unwrap_or("");
+    first
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(first)
+        .to_lowercase()
+}
+
+/// Is this process name (or argv[0]) a package manager?
+pub fn is_package_manager(process_name: &str) -> bool {
+    PACKAGE_MANAGERS.contains(&program_word(process_name).as_str())
+}
+
 /// Returns true if the given process name matches a known AI agent.
 pub fn is_ai_agent(process_name: &str) -> bool {
     let p = process_name.to_lowercase();
     if AGENT_PHRASES.iter().any(|name| p.contains(name)) {
         return true;
+    }
+    if is_package_manager(&p) {
+        return false;
     }
     tokens(&p)
         .iter()
@@ -99,6 +147,12 @@ pub fn is_agent_by_binary(pid: u32) -> bool {
             }
         }
     };
+    is_agent_path(&path)
+}
+
+/// True if an executable path is a known agent install location. The path test
+/// behind `is_agent_by_binary`, usable without a live pid (inventory).
+pub fn is_agent_path(path: &str) -> bool {
     let path_lower = path.to_lowercase();
     // Known agent install paths
     path_lower.contains("cursor-agent")
@@ -127,6 +181,18 @@ pub fn detect_agent_for_pid(pid: u32, comm: &str) -> Option<&'static str> {
     {
         // /proc/<pid>/cmdline is NUL-separated argv.
         if let Ok(data) = std::fs::read(format!("/proc/{pid}/cmdline")) {
+            // A package manager is never an agent by its arguments: in
+            // `node /usr/bin/npm install openclaw@latest`, "openclaw" is the
+            // package, not the program. Look at the program, which is argv[0],
+            // or argv[1] when argv[0] is the interpreter running it.
+            let argv: Vec<String> = data
+                .split(|&b| b == 0)
+                .filter(|t| !t.is_empty())
+                .map(|t| String::from_utf8_lossy(t).into_owned())
+                .collect();
+            if argv.iter().take(2).any(|a| is_package_manager(a)) {
+                return None;
+            }
             for tok in data.split(|&b| b == 0) {
                 if tok.is_empty() {
                     continue;
@@ -166,6 +232,10 @@ pub fn classify_agent(process_name: &str) -> &'static str {
         "aider"
     } else if p.contains("windsurf") {
         "windsurf"
+    } else if p.starts_with("opencode") {
+        "opencode"
+    } else if p.starts_with("agy") || p.contains("antigravity") {
+        "antigravity"
     } else if p.contains("cody") {
         "cody"
     } else if p.contains("tabnine") {
@@ -267,6 +337,38 @@ mod name_tests {
                 "{name:?} must not be classified as an AI agent"
             );
         }
+    }
+
+    /// npm puts its command line in its process name. The package it installs
+    /// is not who it is: `npm i openclaw` is npm, not OpenClaw.
+    #[test]
+    fn a_package_manager_is_never_the_agent_it_installs() {
+        for name in [
+            "npm i openclaw@",
+            "npm install --g",
+            "npm install --global openclaw@latest",
+            "npx nanoclaw",
+            "pnpm add openclaw",
+            "pip install claude-agent-sdk",
+            "pip3",
+            "uv tool install hermes",
+            "bunx openclaw",
+            "/usr/bin/npm",
+        ] {
+            assert!(
+                !is_ai_agent(name),
+                "{name:?} is a package manager, not an agent"
+            );
+            assert!(
+                is_package_manager(name),
+                "{name:?} must be recognised as a package manager"
+            );
+        }
+        assert!(is_package_manager(
+            "/usr/lib/node_modules/npm/bin/npm-cli.js"
+        ));
+        assert!(!is_package_manager("openclaw"));
+        assert!(!is_package_manager("claude"));
     }
 
     #[test]

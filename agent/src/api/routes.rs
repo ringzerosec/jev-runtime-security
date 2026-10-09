@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -127,6 +127,11 @@ pub fn make_router(state: ApiState) -> Router {
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/webhooks/stats", get(get_webhook_stats))
         .route("/api/v1/events", get(get_events))
+        .route("/api/v1/commentary", get(get_commentary))
+        .route(
+            "/api/v1/sessions/:id/commentary",
+            get(get_session_commentary),
+        )
         .route("/api/v1/threats", get(get_threats))
         .route("/api/v1/policy", get(get_policy).post(update_policy))
         .route("/api/v1/intent-diffs", get(get_intent_diffs))
@@ -209,6 +214,19 @@ pub fn make_router(state: ApiState) -> Router {
         .route("/api/v1/skill-scan", post(scan_skills))
         // Skill scanner — auto-enumerate every agent's skill surface
         .route("/api/v1/skill-scan/auto", post(scan_skills_auto))
+        .route("/api/v1/discovery/inventory", get(discovery_inventory))
+        .route(
+            "/api/v1/policy/profiles",
+            get(policy_profiles).put(policy_profile_upsert),
+        )
+        .route(
+            "/api/v1/policy/profiles/:name",
+            delete(policy_profile_remove),
+        )
+        .route(
+            "/api/v1/policy/settings",
+            axum::routing::put(policy_settings_set),
+        )
         .route(
             "/api/v1/scan/baseline",
             get(get_scan_baseline)
@@ -321,6 +339,10 @@ pub struct EventsQuery {
     pub limit: usize,
     /// Optional comma-separated event kind filter (e.g. "llm_request,llm_response,llm_tool_call")
     pub kind: Option<String>,
+    /// Only refusals. Searched over the whole 24-hour window, not just the
+    /// latest `limit` events, so a refusal is never crowded out by noise.
+    #[serde(default)]
+    pub blocked: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -505,12 +527,32 @@ async fn get_events(
     Query(p): Query<EventsQuery>,
 ) -> impl IntoResponse {
     // Fetch more than limit when filtering, to ensure enough results after filtering
-    let fetch_limit = if p.kind.is_some() {
+    let fetch_limit = if p.blocked {
+        usize::MAX
+    } else if p.kind.is_some() {
         p.limit.min(1000) * 10
     } else {
         p.limit.min(1000)
     };
     match state.timeline.all_recent(86400, fetch_limit) {
+        Ok(events) if p.blocked => {
+            let refused: Vec<serde_json::Value> = events
+                .iter()
+                .filter(|e| !e.allowed)
+                .take(p.limit.min(1000))
+                .map(|e| {
+                    let mut v = serde_json::to_value(e).unwrap_or_default();
+                    if let (Some(obj), Some(cat)) =
+                        (v.as_object_mut(), crate::enforcement::classify(e))
+                    {
+                        obj.insert("category".into(), serde_json::json!(cat));
+                        obj.insert("classified_by".into(), serde_json::json!("rules"));
+                    }
+                    v
+                })
+                .collect();
+            Json(serde_json::json!(refused)).into_response()
+        }
         Ok(events) => {
             // Filter noise targets (cgroup, proc, .so files) from file_open events
             let events: Vec<_> = events
@@ -539,7 +581,23 @@ async fn get_events(
             } else {
                 events
             };
-            Json(filtered).into_response()
+            // Each event carries the label the classifier gave it, if any.
+            // The rules classify today; the trained classifiers take over per
+            // category, and `classified_by` says which one answered.
+            let labelled: Vec<serde_json::Value> = filtered
+                .iter()
+                .map(|e| {
+                    let mut v = serde_json::to_value(e).unwrap_or_default();
+                    if let (Some(obj), Some(cat)) =
+                        (v.as_object_mut(), crate::enforcement::classify(e))
+                    {
+                        obj.insert("category".into(), serde_json::json!(cat));
+                        obj.insert("classified_by".into(), serde_json::json!("rules"));
+                    }
+                    v
+                })
+                .collect();
+            Json(labelled).into_response()
         }
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -547,6 +605,68 @@ async fn get_events(
         )
             .into_response(),
     }
+}
+
+#[derive(Deserialize)]
+struct CommentaryQuery {
+    /// Return lines newer than this sequence number.
+    #[serde(default)]
+    after: u64,
+    /// Wait up to this many seconds for a new line (long poll). Capped at 6.
+    #[serde(default)]
+    wait: u64,
+}
+
+/// GET /api/v1/commentary?after=N&wait=5 — live commentary lines.
+async fn get_commentary(Query(q): Query<CommentaryQuery>) -> impl IntoResponse {
+    let wait = std::time::Duration::from_secs(q.wait.min(6));
+    let (lines, last) = if wait.is_zero() {
+        crate::narrator::NARRATOR.since(q.after)
+    } else {
+        crate::narrator::NARRATOR.wait(q.after, wait).await
+    };
+    Json(serde_json::json!({ "lines": lines, "last": last }))
+}
+
+/// GET /api/v1/sessions/:id/commentary — the session's commentary, rebuilt
+/// from what was recorded: its kernel events, the agent's prompts and tool
+/// calls in the session's span, and the agent's thinking lines heard live.
+async fn get_session_commentary(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    use crate::common::event::EventKind;
+    let Some(sess) = state.sessions.get(&id) else {
+        return err_resp(StatusCode::NOT_FOUND, "session not found").into_response();
+    };
+    let agent = crate::narrator::agent_label(&sess.actor);
+    let mut events = state.sessions.get_events(&id);
+    let mut seen: std::collections::HashSet<String> = events.iter().map(|e| e.id.clone()).collect();
+    if let Ok(all) = state.timeline.all_recent(7 * 86400, 5000) {
+        for e in all {
+            if matches!(
+                e.kind,
+                EventKind::LlmRequest | EventKind::LlmResponse | EventKind::LlmToolCall
+            ) && e.timestamp >= sess.start_time
+                && sess.end_time.map_or(true, |end| e.timestamp <= end)
+                && crate::narrator::agent_label(&e.process) == agent
+                && seen.insert(e.id.clone())
+            {
+                events.push(e);
+            }
+        }
+    }
+    let mut lines = crate::narrator::Narrator::replay(&events);
+    let (live, _) = crate::narrator::NARRATOR.since(0);
+    lines.extend(
+        live.into_iter()
+            .filter(|l| l.kind == "thinking" && l.agent == agent && l.at >= sess.start_time),
+    );
+    lines.sort_by_key(|l| l.at);
+    for (i, l) in lines.iter_mut().enumerate() {
+        l.seq = i as u64 + 1;
+    }
+    Json(serde_json::json!({ "session_id": id, "agent": agent, "lines": lines })).into_response()
 }
 
 async fn get_threats(State(state): State<ApiState>) -> impl IntoResponse {
@@ -2108,6 +2228,168 @@ async fn scan_skills(
     .into_response()
 }
 
+// ── Discovery — what AI is installed on this machine ──────────────────────────
+
+/// GET /api/v1/discovery/inventory
+/// Every AI agent, IDE AI extension, MCP server and local model runtime found
+/// across all users, with whether enforcement covers each agent. Read-only:
+/// discovery reads directory listings and config files and never executes what
+/// it finds; MCP secrets are reported by name only.
+async fn discovery_inventory(State(_state): State<ApiState>) -> impl IntoResponse {
+    let inv = tokio::task::spawn_blocking(crate::scanner::inventory::collect)
+        .await
+        .unwrap_or_default();
+    Json(inv)
+}
+
+/// PUT /api/v1/policy/profiles — add or replace one profile (by name).
+/// Full-scope token only (the auth layer refuses mutating calls on the
+/// read-only token); the app reaches this through `rz profile set` under
+/// polkit. Validated before anything is saved; applied live.
+async fn policy_profile_upsert(
+    State(_state): State<ApiState>,
+    Json(p): Json<crate::policy::capability::ProfileConfig>,
+) -> impl IntoResponse {
+    let name = p.name.clone();
+    match crate::policy::capability::ENGINE.upsert(p) {
+        Ok(list) => {
+            tracing::info!(profile = %name, "capability profile saved");
+            crate::policy::capability::ENGINE.refresh_dns().await;
+            crate::policy::capability::sync_kernel().await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": true, "profiles": list })),
+            )
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e })),
+        ),
+    }
+}
+
+/// PUT /api/v1/policy/settings — flip a product-security switch.
+/// Body: any of {"tamper_protection": bool, "prompt_guard": "off|warn|block",
+/// "admin_tools": bool, "escape_tools": bool, "instruction_files": bool,
+/// "package_installs": bool, "quarantine": bool}.
+/// Full-scope token only, and refused from agent callers by the auth layer;
+/// the app reaches this through `rz settings set` under polkit, so the
+/// administrator password is asked every time. Saved to settings.json and
+/// applied live.
+async fn policy_settings_set(
+    State(_state): State<ApiState>,
+    Json(update): Json<crate::config::SettingsOverlay>,
+) -> impl IntoResponse {
+    if update.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok": false, "error": "nothing to change"})),
+        );
+    }
+    match crate::config::SettingsOverlay::save_merged(&update) {
+        Ok(saved) => {
+            if let Some(on) = update.tamper_protection {
+                if let Some(tx) = crate::ebpf_loader::CMD_TX.get() {
+                    let _ = tx
+                        .send(crate::ebpf_loader::EbpfCommand::SetTamperProtect(on))
+                        .await;
+                }
+                tracing::warn!(on, "Tamper protection changed by an administrator");
+            }
+            if let Some(pg) = update.prompt_guard {
+                tracing::info!(?pg, "Prompt guard changed by an administrator");
+            }
+            if update.admin_tools.is_some()
+                || update.escape_tools.is_some()
+                || update.instruction_files.is_some()
+                || update.package_installs.is_some()
+            {
+                let controls = crate::config::DaemonConfig::load().controls;
+                if let Some(tx) = crate::ebpf_loader::CMD_TX.get() {
+                    let _ = tx
+                        .send(crate::ebpf_loader::EbpfCommand::SetControls(
+                            controls.clone(),
+                        ))
+                        .await;
+                }
+                tracing::warn!(?controls, "Kernel controls changed by an administrator");
+            }
+            if let Some(on) = update.quarantine {
+                if let Some(tx) = crate::ebpf_loader::CMD_TX.get() {
+                    let _ = tx
+                        .send(crate::ebpf_loader::EbpfCommand::SetQuarantineEnforce(on))
+                        .await;
+                }
+                tracing::warn!(
+                    on,
+                    "Quarantine of flagged agent-written files changed by an administrator"
+                );
+            }
+            let _ = _state.audit.append(
+                crate::audit::AuditEntryType::PolicyChange,
+                serde_json::json!({"action": "update_settings", "settings": &update}),
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"ok": true, "settings": saved})),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"ok": false, "error": e.to_string()})),
+        ),
+    }
+}
+
+/// DELETE /api/v1/policy/profiles/:name
+async fn policy_profile_remove(
+    State(_state): State<ApiState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match crate::policy::capability::ENGINE.remove(&name) {
+        Ok(list) => {
+            tracing::info!(profile = %name, "capability profile removed");
+            crate::policy::capability::sync_kernel().await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": true, "profiles": list })),
+            )
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "error": e })),
+        ),
+    }
+}
+
+/// GET /api/v1/policy/profiles
+/// Every capability profile with what it allowed and what it would have
+/// refused since the daemon started, plus the latest violations.
+async fn policy_profiles(State(_state): State<ApiState>) -> impl IntoResponse {
+    let cfg = crate::config::DaemonConfig::load();
+    Json(serde_json::json!({
+        "stage": "enforce",
+        "mode": cfg.daemon.mode,
+        "tamper_protection": cfg.daemon.tamper_protection,
+        "prompt_guard": cfg.dlp.prompt_guard,
+        "controls": {
+            "admin_tools": cfg.controls.admin_tools,
+            "escape_tools": cfg.controls.escape_tools,
+            "instruction_files": cfg.controls.instruction_files,
+            "package_installs": cfg.controls.package_installs,
+            "quarantine": cfg.scanner.write_scan.enforce,
+            "write_scan": cfg.scanner.write_scan.enabled,
+            "lists": {
+                "admin_tools": crate::ebpf_loader::ADMIN_TOOLS,
+                "escape_tools": crate::ebpf_loader::ESCAPE_TOOLS,
+                "instruction_files": crate::ebpf_loader::INSTRUCTION_FILES,
+                "package_installs": crate::ebpf_loader::PACKAGE_MANAGERS,
+            },
+        },
+        "profiles": crate::policy::capability::ENGINE.report(),
+    }))
+}
+
 // ── Skill scanner — auto-enumerate every agent's skill surface ────────────────
 
 /// POST /api/v1/skill-scan/auto
@@ -3070,6 +3352,23 @@ async fn update_file_access_rules(
     if let Some(ref ebpf_fn) = state.ebpf_block_file {
         let mut blocked_count = 0usize;
         for rule in &rules {
+            // A directory rule is enforced by the directory map below. Its
+            // last component is not a file name to refuse everywhere: a rule
+            // for ~/rz-test/secrets must not refuse every "secrets" on disk.
+            let mut legacy = false;
+            let is_dir = crate::policy::file_rule::infer_kind(
+                &rule.pattern,
+                rule.kind.as_deref(),
+                rule.description.as_deref(),
+                &mut legacy,
+            ) == crate::policy::file_rule::Kind::Dir;
+            if is_dir && rule.action == "block" {
+                for basename in dir_rule_basenames(&rule.pattern) {
+                    ebpf_fn(basename, true);
+                    blocked_count += 1;
+                }
+                continue;
+            }
             if rule.action == "block" && !rule.pattern.is_empty() {
                 // A concrete absolute path (no glob) is pushed as-is: the eBPF
                 // side then pins the file's (dev, ino) identity as well as its
@@ -3173,6 +3472,17 @@ fn expand_rule_tilde(path: &str) -> String {
 }
 
 pub fn pattern_to_basenames(pattern: &str) -> Vec<String> {
+    expand_basenames(pattern, true)
+}
+
+/// Basenames a DIRECTORY rule stands for: only the known credential stores
+/// (~/.ssh/*, ~/.aws/*). Never the directory's own name — a rule for
+/// ~/rz-test/secrets must not refuse every file or folder called "secrets".
+pub fn dir_rule_basenames(pattern: &str) -> Vec<String> {
+    expand_basenames(pattern, false)
+}
+
+fn expand_basenames(pattern: &str, generic: bool) -> Vec<String> {
     let mut names = Vec::new();
     let pat = pattern.trim();
 
@@ -3233,6 +3543,10 @@ pub fn pattern_to_basenames(pattern: &str) -> Vec<String> {
     if pat.starts_with("*.") {
         // Can't do extension matching in eBPF basename map — skip silently.
         // These are still caught by userspace policy.
+        return names;
+    }
+
+    if !generic {
         return names;
     }
 
@@ -3314,6 +3628,17 @@ async fn receive_hook_event(
         .get("tool_name")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+
+    // ── Prompt guard ───────────────────────────────────────────────────────
+    // A secret pasted into a prompt is checked here, locally, before the agent
+    // sends it anywhere. The verdict's REDACTED text is what gets recorded.
+    let prompt_verdict = match (hook_event, prompt.as_deref()) {
+        ("UserPromptSubmit" | "UserInput" | "user_input", Some(text)) => {
+            let mode = crate::config::DaemonConfig::load().dlp.prompt_guard;
+            Some(crate::secrets::prompt_guard::check(text, mode))
+        }
+        _ => None,
+    };
 
     tracing::info!(
         hook_event,
@@ -3630,7 +3955,16 @@ async fn receive_hook_event(
     // Emit as SecurityEvent based on event type
     match hook_event {
         "UserPromptSubmit" | "UserInput" | "user_input" => {
-            if let Some(ref text) = prompt {
+            if let Some(ref raw) = prompt {
+                // Never store the raw prompt when it held a secret.
+                let text = prompt_verdict
+                    .as_ref()
+                    .map(|v| v.redacted.clone())
+                    .unwrap_or_else(|| raw.clone());
+                let (allowed, reason) = match prompt_verdict.as_ref() {
+                    Some(v) if !v.findings.is_empty() => (!v.block, v.reason()),
+                    _ => (true, None),
+                };
                 let ev = crate::common::event::SecurityEvent {
                     id: format!(
                         "hook-{}-{}",
@@ -3641,9 +3975,13 @@ async fn receive_hook_event(
                     pid: 0,
                     uid: 0,
                     process: agent_type.to_string(),
-                    target: format!("{}:hook", agent_type),
-                    allowed: true,
-                    reason: None,
+                    target: if allowed && reason.is_none() {
+                        format!("{}:hook", agent_type)
+                    } else {
+                        format!("{}:prompt-secret", agent_type)
+                    },
+                    allowed,
+                    reason,
                     timestamp: chrono::Utc::now(),
                     ppid: None,
                     parent_process: None,
@@ -3655,7 +3993,21 @@ async fn receive_hook_event(
                         usage: None,
                         response_ts: chrono::Utc::now(),
                     }),
-                    extra: Some(hook_extra("prompt")),
+                    extra: Some({
+                        let mut x = hook_extra("prompt");
+                        if let (Some(v), Some(obj)) = (prompt_verdict.as_ref(), x.as_object_mut()) {
+                            if !v.findings.is_empty() {
+                                obj.insert(
+                                    "prompt_guard".into(),
+                                    serde_json::json!({
+                                        "blocked": v.block,
+                                        "findings": v.findings,
+                                    }),
+                                );
+                            }
+                        }
+                        x
+                    }),
                 };
                 record(ev);
             }
@@ -3785,12 +4137,17 @@ async fn receive_hook_event(
     // refusal. It names the RULE THAT FIRED and nothing else: no allow-list, no
     // policy contents, no protected-path inventory.
     // Only when actually denying: an allow carries no reason for the model.
-    let reason = if decision_deny {
-        decision_rule.as_deref().map(|rule| {
+    if let Some(v) = prompt_verdict.as_ref().filter(|v| v.block) {
+        decision_deny = true;
+        decision_rule = Some("secret in prompt".to_string());
+        let _ = v;
+    }
+    let reason = match prompt_verdict.as_ref().filter(|v| v.block) {
+        Some(v) => v.reason(),
+        None if decision_deny => decision_rule.as_deref().map(|rule| {
             format!("Ring Zero policy: {rule}. This tool call is out of policy for this agent.")
-        })
-    } else {
-        None
+        }),
+        None => None,
     };
     Json(serde_json::json!({
         "status": "ok",

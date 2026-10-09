@@ -24,23 +24,11 @@ export function ReadOnlyNotice({ command, className }: Props) {
       role="note"
     >
       {unreachable ? (
-        <>The daemon is not reachable, so nothing here can be changed.</>
+        <>Ring Zero's protection service isn't reachable, so nothing here can be changed.</>
       ) : (
         <>
-          Changing this needs an administrator. Saving will ask for a password,
-          then apply the change as root
-          {command ? (
-            <>
-              {' '}
-              — the same thing as running{' '}
-              <code className="font-mono font-medium text-amber-950 dark:text-amber-100">
-                {command}
-              </code>
-            </>
-          ) : (
-            <> — the same thing as running the `rz` command with sudo</>
-          )}
-          .
+          Changing this needs an administrator. Saving asks for the administrator password.
+          {command ? <span className="sr-only"> Equivalent command: {command}</span> : null}
         </>
       )}
     </div>

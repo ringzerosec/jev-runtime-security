@@ -136,6 +136,17 @@ fn is_concrete_path(pattern: &str) -> bool {
 /// `legacy_marker_used` is set when the decision came from the old
 /// `[dir-block]` description marker, so the caller can say so once in the log
 /// and we can drop that path in a later release.
+/// Is this stored rule (as JSON) a directory rule? Same inference as the API.
+pub fn is_dir_rule(rule: &serde_json::Value) -> bool {
+    let mut legacy = false;
+    infer_kind(
+        rule["pattern"].as_str().unwrap_or(""),
+        rule["kind"].as_str(),
+        rule["description"].as_str(),
+        &mut legacy,
+    ) == Kind::Dir
+}
+
 pub fn infer_kind(
     pattern: &str,
     explicit_kind: Option<&str>,

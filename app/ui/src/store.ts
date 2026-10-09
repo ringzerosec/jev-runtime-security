@@ -17,7 +17,7 @@ function makeBrowserInvoke(): InvokeFn {
       get_status: { path: '/api/v1/status' },
       get_skills: { path: '/api/v1/policy' },
       get_events: {
-        path: `/api/v1/events?limit=${args?.limit ?? 100}${args?.kind ? `&kind=${args.kind}` : ''}`,
+        path: `/api/v1/events?limit=${args?.limit ?? 100}${args?.kind ? `&kind=${args.kind}` : ''}${args?.blocked ? '&blocked=true' : ''}`,
       },
       scan_skills_auto: { path: '/api/v1/skill-scan/auto', method: 'POST' },
       get_enforcement: { path: '/api/v1/enforcement' },
@@ -50,6 +50,8 @@ function makeBrowserInvoke(): InvokeFn {
         ppid: e.ppid,
         parent_process: e.parent_process,
         llm_context: e.llm_context,
+        category: e.category,
+        classified_by: e.classified_by,
       })) as T;
     }
     return data as T;
@@ -172,6 +174,9 @@ interface Event {
   ppid?: number;
   parent_process?: string;
   llm_context?: LlmContext;
+  /** Threat category a classifier put on this event. */
+  category?: string;
+  classified_by?: string;
 }
 
 // ── Enforcement policy (per-category) ──────────────────────────────────────
@@ -200,6 +205,10 @@ interface Store {
   status: Status;
   skills: Skill[];
   events: Event[];
+  /** Every refusal in the last 24 hours, newest first. Fetched on its own so
+   *  busy activity never crowds one out of the Threats page or the notices. */
+  refusals: Event[];
+  refusalsLoaded: boolean;
   daemonConnected: boolean;
   enforcement: EnforcementConfig | null;
 
@@ -217,6 +226,8 @@ export const useStore = create<Store>((set, get) => ({
   status: { connected: false },
   skills: [],
   events: [],
+  refusals: [],
+  refusalsLoaded: false,
   daemonConnected: false,
   enforcement: null,
 
@@ -248,8 +259,11 @@ export const useStore = create<Store>((set, get) => ({
 
   fetchEvents: async () => {
     try {
-      const events = await invoke<Event[]>('get_events', { limit: 100 });
-      set({ events });
+      const [events, refusals] = await Promise.all([
+        invoke<Event[]>('get_events', { limit: 100 }),
+        invoke<Event[]>('get_events', { limit: 500, blocked: true }),
+      ]);
+      set({ events, refusals: Array.isArray(refusals) ? refusals : [], refusalsLoaded: true });
     } catch (err) {
       console.error('Failed to fetch events:', err);
     }

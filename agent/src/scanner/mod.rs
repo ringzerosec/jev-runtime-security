@@ -5,6 +5,7 @@
 
 pub mod baseline;
 pub mod entropy;
+pub mod inventory;
 pub mod jev_layer;
 pub mod model_armor;
 pub mod osv;

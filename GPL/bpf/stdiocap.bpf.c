@@ -16,6 +16,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+#include "agent_names.h"
 
 #define MAX_BUF_SIZE    8192
 #define RING_BUF_SIZE   (4 * 1024 * 1024)  // 4MB ring buffer
@@ -119,6 +120,18 @@ struct {
     __type(key, u32);    // pid
     __type(value, u8);   // 1 = tracked
 } tracked_pids SEC(".maps");
+
+// DNS answers are read for the agent's WHOLE process tree, not just the agent:
+// git, npm, curl and python do their own lookups, and those answers are what
+// teach an approved *.domain its addresses. Kept apart from tracked_pids so
+// terminal capture is not widened along with it. Tagged at fork, dropped at
+// exit; LRU so a missed exit cannot fill it.
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 16384);
+    __type(key, u32);
+    __type(value, u8);
+} dns_tree_pids SEC(".maps");
 
 // Config: trace all PIDs (1) or only tracked (0)
 struct {
@@ -237,7 +250,52 @@ static __always_inline int dns_tracked(u32 pid) {
     if (trace_all && *trace_all)
         return 1;
     u8 *val = bpf_map_lookup_elem(&tracked_pids, &pid);
-    return val && *val;
+    if (val && *val)
+        return 1;
+    if (bpf_map_lookup_elem(&dns_tree_pids, &pid))
+        return 1;
+    char comm[MAX_COMM_LEN] = {};
+    bpf_get_current_comm(comm, sizeof(comm));
+    return is_ai_agent(comm);
+}
+
+SEC("tp/sched/sched_process_fork")
+int dns_tree_fork(struct trace_event_raw_sched_process_fork *ctx) {
+    u32 ppid = (u32)ctx->parent_pid;
+    char pcomm[MAX_COMM_LEN] = {};
+    bpf_get_current_comm(pcomm, sizeof(pcomm));
+    u8 *tp = bpf_map_lookup_elem(&tracked_pids, &ppid);
+    if (!bpf_map_lookup_elem(&dns_tree_pids, &ppid) && !(tp && *tp) && !is_ai_agent(pcomm))
+        return 0;
+    u32 cpid = (u32)ctx->child_pid;
+    u8 one = 1;
+    bpf_map_update_elem(&dns_tree_pids, &cpid, &one, BPF_ANY);
+    return 0;
+}
+
+// A process that becomes an agent by exec is part of the tree from then on,
+// including whatever it later execs into without forking (`sh -c tool`).
+SEC("tp/sched/sched_process_exec")
+int dns_tree_exec(void *ctx) {
+    char comm[MAX_COMM_LEN] = {};
+    bpf_get_current_comm(comm, sizeof(comm));
+    if (!is_ai_agent(comm))
+        return 0;
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    u8 one = 1;
+    bpf_map_update_elem(&dns_tree_pids, &pid, &one, BPF_ANY);
+    return 0;
+}
+
+SEC("tp/sched/sched_process_exit")
+int dns_tree_exit(void *ctx) {
+    u64 id = bpf_get_current_pid_tgid();
+    // Only when the whole process goes, not one of its threads.
+    if ((u32)id != (u32)(id >> 32))
+        return 0;
+    u32 pid = id >> 32;
+    bpf_map_delete_elem(&dns_tree_pids, &pid);
+    return 0;
 }
 
 SEC("tp/syscalls/sys_enter_recvfrom")

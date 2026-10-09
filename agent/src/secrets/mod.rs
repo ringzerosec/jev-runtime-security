@@ -5,4 +5,5 @@
 
 pub mod detector;
 pub mod dlp;
+pub mod prompt_guard;
 pub mod rotation;

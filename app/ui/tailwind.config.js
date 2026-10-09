@@ -1,4 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
+// Theme colors are CSS variables holding plain hex values. Wrapping them in
+// color-mix with Tailwind's <alpha-value> placeholder makes opacity suffixes
+// such as bg-primary/5 or bg-muted-foreground/30 work; without it Tailwind
+// silently emits no rule for them.
+const v = (name) => `color-mix(in srgb, var(--${name}) calc(<alpha-value> * 100%), transparent)`;
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
@@ -9,63 +15,63 @@ export default {
         mono: ["Geist Mono", "ui-monospace", "SFMono-Regular", "monospace"],
       },
       colors: {
-        border: "var(--border)",
-        input: "var(--input)",
-        ring: "var(--ring)",
-        background: "var(--background)",
-        foreground: "var(--foreground)",
+        border: v("border"),
+        input: v("input"),
+        ring: v("ring"),
+        background: v("background"),
+        foreground: v("foreground"),
         primary: {
-          DEFAULT: "var(--primary)",
-          foreground: "var(--primary-foreground)",
+          DEFAULT: v("primary"),
+          foreground: v("primary-foreground"),
         },
         secondary: {
-          DEFAULT: "var(--secondary)",
-          foreground: "var(--secondary-foreground)",
+          DEFAULT: v("secondary"),
+          foreground: v("secondary-foreground"),
         },
         destructive: {
-          DEFAULT: "var(--destructive)",
-          foreground: "var(--destructive-foreground)",
+          DEFAULT: v("destructive"),
+          foreground: v("destructive-foreground"),
         },
         muted: {
-          DEFAULT: "var(--muted)",
-          foreground: "var(--muted-foreground)",
+          DEFAULT: v("muted"),
+          foreground: v("muted-foreground"),
         },
         accent: {
-          DEFAULT: "var(--accent)",
-          foreground: "var(--accent-foreground)",
+          DEFAULT: v("accent"),
+          foreground: v("accent-foreground"),
         },
         popover: {
-          DEFAULT: "var(--popover)",
-          foreground: "var(--popover-foreground)",
+          DEFAULT: v("popover"),
+          foreground: v("popover-foreground"),
         },
         card: {
-          DEFAULT: "var(--card)",
-          foreground: "var(--card-foreground)",
+          DEFAULT: v("card"),
+          foreground: v("card-foreground"),
         },
         teal: {
-          DEFAULT: "var(--teal)",
-          dark: "var(--teal-dark)",
-          light: "var(--teal-light)",
+          DEFAULT: v("teal"),
+          dark: v("teal-dark"),
+          light: v("teal-light"),
         },
         event: {
-          allow: "var(--event-allow)",
-          "allow-bg": "var(--event-allow-bg)",
-          "allow-text": "var(--event-allow-text)",
-          pii: "var(--event-pii)",
-          "pii-bg": "var(--event-pii-bg)",
-          "pii-text": "var(--event-pii-text)",
-          block: "var(--event-block)",
-          "block-bg": "var(--event-block-bg)",
-          "block-text": "var(--event-block-text)",
-          injection: "var(--event-injection)",
-          "injection-bg": "var(--event-injection-bg)",
-          "injection-text": "var(--event-injection-text)",
-          muted: "var(--event-muted)",
-          "muted-bg": "var(--event-muted-bg)",
+          allow: v("event-allow"),
+          "allow-bg": v("event-allow-bg"),
+          "allow-text": v("event-allow-text"),
+          pii: v("event-pii"),
+          "pii-bg": v("event-pii-bg"),
+          "pii-text": v("event-pii-text"),
+          block: v("event-block"),
+          "block-bg": v("event-block-bg"),
+          "block-text": v("event-block-text"),
+          injection: v("event-injection"),
+          "injection-bg": v("event-injection-bg"),
+          "injection-text": v("event-injection-text"),
+          muted: v("event-muted"),
+          "muted-bg": v("event-muted-bg"),
         },
       },
       borderRadius: {
-        lg: "var(--radius)",
+        lg: v("radius"),
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },

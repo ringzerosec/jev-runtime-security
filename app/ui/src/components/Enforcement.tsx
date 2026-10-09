@@ -149,7 +149,7 @@ const ACTION_CONFIG: Record<
     ring: 'ring-amber-300',
   },
   block: {
-    label: 'Block',
+    label: 'Violation',
     // NOT a kernel block. Nothing in the event pipeline reads this posture
     // today (agent/src/enforcement.rs::evaluate_event is unreferenced), so
     // this records an intent and refuses nothing. File-access rules are the
@@ -178,7 +178,7 @@ const DEFAULT_CATEGORIES: EnforcementCategories = {
   harmful_content: 'observe',
 };
 
-export default function Enforcement() {
+export default function Enforcement({ embedded = false }: { embedded?: boolean } = {}) {
   // A read-only token no longer means a control cannot be used: a write goes
   // through polkit. Only an unreachable daemon disables these.
   const { unreachable } = useTokenScope();
@@ -275,12 +275,14 @@ export default function Enforcement() {
   return (
     <div className="space-y-6 max-w-4xl">
       {/* Header */}
-      <div>
-        <h2 className="text-3xl font-bold tracking-tight">Enforcement Policy</h2>
-        <p className="text-muted-foreground">
-          Configure how Ring Zero responds to each threat category
-        </p>
-      </div>
+      {!embedded && (
+        <div>
+          <h2 className="text-3xl font-bold tracking-tight">Enforcement Policy</h2>
+          <p className="text-muted-foreground">
+            Configure how Ring Zero responds to each threat category
+          </p>
+        </div>
+      )}
 
       <ReadOnlyNotice command="sudo rz enforcement set-default <observe|alert|block>" />
 

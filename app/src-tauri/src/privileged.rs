@@ -131,6 +131,44 @@ pub fn validate(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        // rz sessions terminate <session id> — ends the agent's processes.
+        ["sessions", "terminate", id] => {
+            if !id.is_empty()
+                && id.len() <= 128
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+            {
+                Ok(())
+            } else {
+                Err("not a session id".into())
+            }
+        }
+        // rz settings set <tamper_protection on|off | prompt_guard off|warn|block>
+        ["settings", "set", "tamper_protection" | "admin_tools" | "escape_tools" | "instruction_files"
+        | "package_installs" | "quarantine", "on" | "off"] => Ok(()),
+        ["settings", "set", "prompt_guard", "off" | "warn" | "block"] => Ok(()),
+        // rz profile set --json <one profile object>
+        //
+        // The JSON is checked here only for shape (bounded, one object); the
+        // daemon validates every field before anything is saved, and refuses
+        // the whole profile on any bad field.
+        ["profile", "set", "--json", json] => {
+            if json.len() > 16 * 1024 || json.chars().any(|c| c.is_control() && c != '\n') {
+                return Err("profile JSON is too large or has control characters".into());
+            }
+            match serde_json::from_str::<serde_json::Value>(json) {
+                Ok(v) if v.is_object() => Ok(()),
+                _ => Err("profile must be one JSON object".into()),
+            }
+        }
+        // rz profile remove <name>
+        ["profile", "remove", name] => {
+            if !sane_value(name, 64) {
+                return Err("profile name is empty, too long, or has control characters".into());
+            }
+            Ok(())
+        }
         // rz file-access remove <id>
         ["file-access", "remove", id] => {
             if !sane_token(id, 128) {
@@ -226,14 +264,18 @@ pub fn run(args: &[String]) -> Outcome {
         // 127 is also what a caller with nothing to authenticate through gets:
         // no polkit agent and no controlling terminal, which is exactly what a
         // background process looks like. Say that, and keep polkit's own words.
-        127 => Outcome::Unavailable {
-            message: if stderr.is_empty() {
-                "polkit could not authenticate this change (no authentication agent available)"
-                    .to_string()
-            } else {
-                format!("polkit could not authenticate this change: {stderr}")
-            },
-        },
+        127 => {
+            // Keep polkit's own words in the log for support; show the person
+            // what to do instead. The usual cause is an app started outside the
+            // desktop session (for example from a remote shell), which has no
+            // password window to ask through.
+            if !stderr.is_empty() {
+                eprintln!("ringzero-app: pkexec could not authenticate: {stderr}");
+            }
+            Outcome::Unavailable {
+                message: "The password window could not open. Close Ring Zero and open it again from your applications menu.".to_string(),
+            }
+        }
         other => Outcome::Failed {
             code: other,
             stderr: if stderr.is_empty() { stdout } else { stderr },
@@ -265,6 +307,48 @@ mod tests {
         assert!(v(&["enforcement", "set-default", "block"]).is_ok());
         assert!(v(&["enforcement", "set-category", "credential_access", "alert"]).is_ok());
         assert!(v(&["review", "label", "abc123", "false-positive"]).is_ok());
+    }
+
+    #[test]
+    fn profile_commands() {
+        assert!(v(&[
+            "profile",
+            "set",
+            "--json",
+            r#"{"name":"Claude Code","agent":"claude"}"#
+        ])
+        .is_ok());
+        assert!(
+            v(&["profile", "set", "--json", "[1,2]"]).is_err(),
+            "must be one object"
+        );
+        assert!(v(&["profile", "set", "--json", "not json"]).is_err());
+        assert!(
+            v(&["profile", "set", "--json", &"x".repeat(17 * 1024)]).is_err(),
+            "bounded"
+        );
+        assert!(v(&["profile", "set", "{}"]).is_err(), "--json is required");
+        assert!(v(&["profile", "remove", "Claude Code"]).is_ok());
+        assert!(v(&["profile", "remove", "bad\u{7}name"]).is_err());
+        assert!(
+            v(&["profile", "show"]).is_err(),
+            "read-only commands never need root"
+        );
+        assert!(v(&["settings", "set", "tamper_protection", "off"]).is_ok());
+        assert!(v(&["settings", "set", "prompt_guard", "block"]).is_ok());
+        assert!(v(&["settings", "set", "tamper_protection", "maybe"]).is_err());
+        assert!(v(&["settings", "set", "admin_tools", "off"]).is_ok());
+        assert!(v(&["settings", "set", "instruction_files", "on"]).is_ok());
+        assert!(v(&["settings", "set", "package_installs", "off"]).is_ok());
+        assert!(v(&["settings", "set", "quarantine", "on"]).is_ok());
+        assert!(v(&["settings", "set", "admin_tools", "sudo"]).is_err());
+        assert!(v(&["sessions", "terminate", "auto-opencode-8795"]).is_ok());
+        assert!(v(&["sessions", "terminate", "../x"]).is_err());
+        assert!(v(&["sessions", "terminate", "a b"]).is_err());
+        assert!(
+            v(&["settings", "set", "mode", "observe"]).is_err(),
+            "only the listed switches"
+        );
     }
 
     /// The allow-list is the whole point: a webview that has been taken over

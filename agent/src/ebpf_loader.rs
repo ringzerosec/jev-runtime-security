@@ -14,7 +14,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use aya::{
-    maps::{Array, HashMap as AyaHashMap, Map, MapData, PerCpuArray, RingBuf},
+    maps::{
+        lpm_trie::{Key as LpmKey, LpmTrie},
+        Array, HashMap as AyaHashMap, Map, MapData, PerCpuArray, RingBuf,
+    },
     programs::{Lsm, TracePoint},
     Bpf, BpfLoader, Btf,
 };
@@ -58,8 +61,16 @@ struct Config {
     /// often a normal session taints before enforcing on it. Mirrors
     /// `taint_on_egress` in the C config; struct size unchanged.
     taint_on_egress: u8,
-    _reserved: [u8; 1],
+    /// Tamper protection: the daemon cannot be signalled (except by pid 1) or
+    /// ptraced, and agent process trees cannot use bpf(). Mirrors
+    /// `tamper_protect` in the C config; struct size unchanged.
+    tamper_protect: u8,
 }
+
+/// The live command channel into the eBPF subsystem, once it is up. Lets the
+/// API apply a setting (e.g. tamper protection) immediately, without a restart.
+pub static CMD_TX: once_cell::sync::OnceCell<tokio::sync::mpsc::Sender<EbpfCommand>> =
+    once_cell::sync::OnceCell::new();
 
 /// Mirrors `struct write_verdict` in GPL/bpf/ringzero.bpf.c.
 ///
@@ -116,6 +127,35 @@ unsafe impl aya::Pod for TaintInfo {}
 unsafe impl aya::Pod for ProxyConfig {}
 unsafe impl aya::Pod for BlockKey {}
 unsafe impl aya::Pod for InoKey {}
+
+/// Mirrors `struct profile_policy` in ringzero.bpf.c.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct ProfilePolicy {
+    programs_enforce: u8,
+    allow_spawn: u8,
+    network_enforce: u8,
+    _pad: u8,
+}
+/// Mirrors `struct prog_key`.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct ProgKey {
+    slot: u8,
+    name: [u8; MAX_COMM_LEN],
+    _pad: [u8; 3],
+}
+/// The data half of `struct host_key` (the LPM prefix length is separate).
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct HostKeyData {
+    slot: u8,
+    _pad: [u8; 3],
+    ip: u32,
+}
+unsafe impl aya::Pod for ProfilePolicy {}
+unsafe impl aya::Pod for ProgKey {}
+unsafe impl aya::Pod for HostKeyData {}
 /// Mirrors `struct write_origin` in GPL/bpf/ringzero.bpf.c.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
@@ -319,7 +359,18 @@ pub(crate) fn agent_display_name(comm: &str, parent_comm: &[u8]) -> String {
 fn kernel_event_to_driver_msg(e: &KernelEvent) -> DriverMessage {
     let raw_comm = cstr(&e.comm);
     let comm = agent_display_name(&raw_comm, &e.parent_comm);
-    let path = cstr(&e.path);
+    // A refused file open carries the file's full path in `args` (the kernel
+    // fills it only on refusals). Use it, so the record says WHICH file.
+    let full = if e.event_type == 1 && e.blocked == 1 {
+        cstr(&e.args)
+    } else {
+        String::new()
+    };
+    let path = if full.starts_with('/') {
+        full
+    } else {
+        cstr(&e.path)
+    };
 
     // Extract args for exec events (event_type 10)
     let args = if e.event_type == 10 {
@@ -373,6 +424,139 @@ fn kernel_event_to_driver_msg(e: &KernelEvent) -> DriverMessage {
             args,
         }
     }
+}
+
+/// Whether the package-installs control is on. The kernel holds package
+/// managers only when it is; the interpreter check below reads this.
+static PACKAGE_GUARD_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tell the process that was refused why, on its own stderr, so the agent that
+/// ran it can read the reason and pass it on. Best effort.
+///
+/// The daemon has no CAP_DAC_OVERRIDE (on purpose), so it cannot open another
+/// user's pipe through /proc/<pid>/fd/2. It borrows the already-open
+/// descriptor with pidfd_getfd instead, which needs only CAP_SYS_PTRACE.
+fn tell_refused(pid: u32, command: &str) {
+    let msg = format!(
+        "\nRing Zero Security refused `{command}`: agents can't install packages on this machine. \
+         Ask the person you are working for to install it.\n"
+    );
+    unsafe {
+        let pidfd = libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) as i32;
+        if pidfd < 0 {
+            return;
+        }
+        let fd = libc::syscall(libc::SYS_pidfd_getfd, pidfd, 2, 0) as i32;
+        if fd >= 0 {
+            let _ = libc::write(fd, msg.as_ptr() as *const libc::c_void, msg.len());
+            libc::close(fd);
+        }
+        libc::close(pidfd);
+    }
+}
+
+/// The agent a process belongs to: the nearest ancestor that is an agent by
+/// name, as its display name. Read before the process is killed, while the
+/// chain is still there to walk.
+fn owning_agent(mut pid: u32) -> Option<String> {
+    for _ in 0..16 {
+        if pid <= 1 {
+            return None;
+        }
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        let comm = comm.trim();
+        if crate::common::agent_detect::is_ai_agent(comm) {
+            return Some(agent_display_name(comm, &[0u8; MAX_COMM_LEN]));
+        }
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // Field 4, after the ")" that closes comm (which may contain spaces).
+        let after = &stat[stat.rfind(')')? + 1..];
+        pid = after.split_whitespace().nth(1)?.parse().ok()?;
+    }
+    None
+}
+
+/// Refuse an install: say why, then kill it. A stopped process dies on SIGKILL.
+fn refuse_install(pid: u32, command: &str) {
+    tell_refused(pid, command);
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+}
+
+/// A package manager in an agent's tree, stopped by the kernel (event 13).
+/// Decide here, on the reader's own thread: a stopped process must never wait
+/// on a full channel. Installs are killed and reported as a refused exec; any
+/// other command is resumed and reports nothing new (its exec was already seen).
+fn decide_package_hold(e: &KernelEvent) -> Option<DriverMessage> {
+    use crate::policy::package_guard::{argv_of, install_command, TARGET_PREFIX};
+    let pid = e.pid;
+    let argv = argv_of(pid).unwrap_or_default();
+    match install_command(&argv) {
+        Some(install) => {
+            let agent = owning_agent(e.ppid);
+            refuse_install(pid, &install.command);
+            tracing::warn!(pid, command = %install.command, agent = ?agent, "Refused a package install by an agent");
+            Some(DriverMessage::Event {
+                event_type: 10,
+                pid,
+                uid: e.uid,
+                comm: agent.unwrap_or_else(|| agent_display_name(&cstr(&e.comm), &e.parent_comm)),
+                path: Some(format!("{TARGET_PREFIX}{}", install.command)),
+                remote_ip: None,
+                remote_port: None,
+                blocked: 1,
+                args: Some(argv.join(" ")),
+            })
+        }
+        None => {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGCONT);
+            }
+            None
+        }
+    }
+}
+
+/// `python3 -m pip install x` runs as python, not pip, so the kernel does not
+/// hold it. Check agent-tree interpreter execs a moment after they start and
+/// refuse installs then. Slower than the hold, so it is the backstop.
+fn check_interpreter_install(e: &KernelEvent, tx: tokio::sync::mpsc::Sender<DriverMessage>) {
+    if e.event_type != 10 || !PACKAGE_GUARD_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let path = cstr(&e.path);
+    let base = path.rsplit('/').next().unwrap_or("");
+    if !(base.starts_with("python") || base == "node" || base == "env") {
+        return;
+    }
+    let (pid, uid) = (e.pid, e.uid);
+    let comm = agent_display_name(&cstr(&e.comm), &e.parent_comm);
+    std::thread::spawn(move || {
+        use crate::policy::package_guard::{argv_of, install_command, TARGET_PREFIX};
+        // The event is raised before the exec completes; give it a moment.
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(10));
+            let Some(argv) = argv_of(pid) else { return };
+            if let Some(install) = install_command(&argv) {
+                let agent = owning_agent(pid);
+                refuse_install(pid, &install.command);
+                tracing::warn!(pid, command = %install.command, "Refused a package install by an agent (interpreter)");
+                let _ = tx.try_send(DriverMessage::Event {
+                    event_type: 10,
+                    pid,
+                    uid,
+                    comm: agent.unwrap_or(comm),
+                    path: Some(format!("{TARGET_PREFIX}{}", install.command)),
+                    remote_ip: None,
+                    remote_port: None,
+                    blocked: 1,
+                    args: Some(argv.join(" ")),
+                });
+                return;
+            }
+        }
+    });
 }
 
 fn send_event_to_driver_msg(se: &SendEvent) -> DriverMessage {
@@ -581,6 +765,274 @@ fn expand_tilde(path: &str) -> String {
     path.replacen("~", "/root", 1)
 }
 
+/// Ring Zero's own state, off-limits to every agent process tree.
+///
+/// WHY THIS IS NOT A NORMAL RULE. Policy can only be changed through the
+/// admin-password prompt if nothing else can change it. The API already
+/// refuses writes from agent callers and needs the root-only token, but an
+/// agent in a terminal where the operator recently used sudo can skip the API
+/// entirely: read the token, or edit profiles.json / daemon.toml directly.
+/// The kernel refuses agent-tree access by tree membership, not by uid, so
+/// this holds for a root agent too. Not removable from the app or the CLI.
+///
+/// WHAT IT CANNOT COVER. The binaries are not blocked, because a file block
+/// refuses every open including the open for exec, and agents must still be
+/// able to run `rz` and `rz-hook`. Stopping the service through systemd is
+/// also not covered: systemd, not the agent, delivers the signal.
+const SELF_PROTECTED_DIRS: &[&str] = &[
+    "/etc/ringzero",
+    "/var/lib/ringzero",
+    "/etc/systemd/system/ringzero-daemon.service.d",
+];
+const SELF_PROTECTED_FILES: &[&str] = &[
+    "/etc/systemd/system/ringzero-daemon.service",
+    "/lib/systemd/system/ringzero-daemon.service",
+];
+
+/// Install the self-protection blocks. Idempotent; called at load and again
+/// after anything that clears the directory-block switch.
+fn apply_self_protection(bpf: &mut Bpf) {
+    for f in SELF_PROTECTED_FILES {
+        let p = std::path::Path::new(f);
+        if p.is_file() {
+            block_inode_path(bpf, p);
+        }
+    }
+    let Some(m) = bpf.map_mut("blocked_dir_inodes") else {
+        return;
+    };
+    let Ok(mut dir_map) = AyaHashMap::<_, InoKey, u8>::try_from(m) else {
+        return;
+    };
+    let mut n = 0;
+    for d in SELF_PROTECTED_DIRS {
+        if let Some(key) = resolve_dir_inode_key(std::path::Path::new(d)) {
+            let _ = dir_map.insert(key, 1u8, 0);
+            n += 1;
+        }
+    }
+    if n > 0 {
+        // The sentinel turns directory blocking on.
+        let _ = dir_map.insert(
+            InoKey {
+                ino: 0,
+                dev: 0,
+                _pad: 0,
+            },
+            1u8,
+            0,
+        );
+        info!("Self-protection: {n} Ring Zero directories are off-limits to every agent");
+    }
+}
+
+/// Programs refused to agent trees by the admin-tools control.
+pub const ADMIN_TOOLS: &[&str] = &["sudo", "su", "pkexec", "doas", "run0"];
+/// Programs refused by the escape-tools control: each starts work outside the
+/// agent's process tree, where fork-time tracking cannot follow it.
+pub const ESCAPE_TOOLS: &[&str] = &["systemd-run", "at", "batch", "crontab"];
+/// Files agents may read but not change, by basename.
+pub const INSTRUCTION_FILES: &[&str] = &[
+    "CLAUDE.md",
+    "CLAUDE.local.md",
+    "AGENTS.md",
+    "GEMINI.md",
+    ".cursorrules",
+    ".windsurfrules",
+    "SKILL.md",
+    ".mcp.json",
+    "copilot-instructions.md",
+];
+
+/// Package managers the package-installs control holds for a decision.
+pub const PACKAGE_MANAGERS: &[&str] = &[
+    "npm", "npx", "pnpm", "yarn", "bun", "bunx", "pip", "pip3", "pipx", "uv", "uvx", "poetry",
+    "cargo", "gem",
+];
+
+fn comm_key(name: &str) -> [u8; MAX_COMM_LEN] {
+    let mut key = [0u8; MAX_COMM_LEN];
+    let b = name.as_bytes();
+    let n = b.len().min(MAX_COMM_LEN - 1);
+    key[..n].copy_from_slice(&b[..n]);
+    key
+}
+
+/// Fill the control lists from the switches. Idempotent: every entry a switch
+/// owns is inserted when it is on and removed when it is off.
+fn apply_controls(bpf: &mut Bpf, c: &crate::config::ControlsSection) {
+    if let Some(m) = bpf.map_mut("agent_denied_programs") {
+        if let Ok(mut map) = AyaHashMap::<_, [u8; MAX_COMM_LEN], u8>::try_from(m) {
+            for (list, on, tag) in [
+                (ADMIN_TOOLS, c.admin_tools, 1u8),
+                (ESCAPE_TOOLS, c.escape_tools, 2u8),
+            ] {
+                for name in list {
+                    let k = comm_key(name);
+                    if on {
+                        let _ = map.insert(k, tag, 0);
+                    } else {
+                        let _ = map.remove(&k);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(m) = bpf.map_mut("agent_readonly_names") {
+        if let Ok(mut map) = AyaHashMap::<_, [u8; MAX_PATH_LEN], u8>::try_from(m) {
+            for name in INSTRUCTION_FILES {
+                let k = make_file_key(name);
+                if c.instruction_files {
+                    let _ = map.insert(k, 1u8, 0);
+                } else {
+                    let _ = map.remove(&k);
+                }
+            }
+        }
+    }
+    // Like every control, it refuses only while the daemon is enforcing.
+    let enforcing = crate::config::DaemonConfig::load().daemon.mode == "enforce";
+    PACKAGE_GUARD_ON.store(
+        c.package_installs && enforcing,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    if let Some(m) = bpf.map_mut("pkg_guard") {
+        if let Ok(mut arr) = Array::<_, u8>::try_from(m) {
+            let _ = arr.set(0, c.package_installs as u8, 0);
+        }
+    }
+    info!(
+        admin_tools = c.admin_tools,
+        escape_tools = c.escape_tools,
+        instruction_files = c.instruction_files,
+        package_installs = c.package_installs,
+        "Kernel controls applied to agent process trees"
+    );
+}
+
+/// Load the capability profiles into the kernel. Ordered so that nothing is
+/// refused by mistake while it runs: allowances are added first, then the
+/// per-profile switches are written, and only then are stale allowances
+/// removed.
+fn apply_profiles(bpf: &mut Bpf, st: &crate::policy::capability::KernelProfiles) {
+    use std::collections::HashSet;
+    let prog_want: HashSet<ProgKey> = st
+        .programs
+        .iter()
+        .map(|(slot, name)| ProgKey {
+            slot: *slot,
+            name: comm_key(name),
+            _pad: [0; 3],
+        })
+        .collect();
+    let host_want: HashSet<(u32, HostKeyData)> = st
+        .hosts
+        .iter()
+        .map(|(slot, net, len)| {
+            (
+                32 + *len as u32,
+                HostKeyData {
+                    slot: *slot,
+                    _pad: [0; 3],
+                    ip: u32::from_ne_bytes(net.octets()),
+                },
+            )
+        })
+        .collect();
+
+    // 1. Add allowances.
+    if let Some(m) = bpf.map_mut("profile_programs") {
+        if let Ok(mut map) = AyaHashMap::<_, ProgKey, u8>::try_from(m) {
+            for k in &prog_want {
+                let _ = map.insert(*k, 1u8, 0);
+            }
+        }
+    }
+    if let Some(m) = bpf.map_mut("profile_hosts") {
+        if let Ok(mut map) = LpmTrie::<_, HostKeyData, u8>::try_from(m) {
+            for (len, d) in &host_want {
+                if let Err(e) = map.insert(&LpmKey::new(*len, *d), 1u8, 0) {
+                    warn!(err = %e, "profile host could not be loaded into the kernel");
+                }
+            }
+        }
+    }
+    // 2. Names and switches.
+    if let Some(m) = bpf.map_mut("agent_profile_by_name") {
+        if let Ok(mut map) = AyaHashMap::<_, [u8; MAX_COMM_LEN], u8>::try_from(m) {
+            let want: std::collections::HashMap<[u8; MAX_COMM_LEN], u8> =
+                st.names.iter().map(|(n, s)| (comm_key(n), *s)).collect();
+            let stale: Vec<[u8; MAX_COMM_LEN]> = map
+                .keys()
+                .filter_map(|k| k.ok())
+                .filter(|k| !want.contains_key(k))
+                .collect();
+            for (k, v) in &want {
+                let _ = map.insert(*k, *v, 0);
+            }
+            for k in stale {
+                let _ = map.remove(&k);
+            }
+        }
+    }
+    if let Some(m) = bpf.map_mut("profile_policy_map") {
+        if let Ok(mut map) = Array::<_, ProfilePolicy>::try_from(m) {
+            for slot in 0..256u32 {
+                let pol = st
+                    .policies
+                    .iter()
+                    .find(|(s, ..)| *s as u32 == slot)
+                    .map(|(_, pe, sp, ne)| ProfilePolicy {
+                        programs_enforce: *pe as u8,
+                        allow_spawn: *sp as u8,
+                        network_enforce: *ne as u8,
+                        _pad: 0,
+                    })
+                    .unwrap_or_default();
+                let _ = map.set(slot, pol, 0);
+            }
+        }
+    }
+    // 3. Remove what is no longer allowed.
+    if let Some(m) = bpf.map_mut("profile_programs") {
+        if let Ok(mut map) = AyaHashMap::<_, ProgKey, u8>::try_from(m) {
+            let stale: Vec<ProgKey> = map
+                .keys()
+                .filter_map(|k| k.ok())
+                .filter(|k| !prog_want.contains(k))
+                .collect();
+            for k in stale {
+                let _ = map.remove(&k);
+            }
+        }
+    }
+    if let Some(m) = bpf.map_mut("profile_hosts") {
+        if let Ok(mut map) = LpmTrie::<_, HostKeyData, u8>::try_from(m) {
+            let stale: Vec<LpmKey<HostKeyData>> = map
+                .keys()
+                .filter_map(|k| k.ok())
+                .filter(|k| !host_want.contains(&(k.prefix_len(), k.data())))
+                .collect();
+            for k in stale {
+                let _ = map.remove(&k);
+            }
+        }
+    }
+    let enforcing: Vec<u8> = st
+        .policies
+        .iter()
+        .filter(|(_, pe, _, ne)| *pe || *ne)
+        .map(|(s, ..)| *s)
+        .collect();
+    info!(
+        profiles = st.policies.len(),
+        enforcing = enforcing.len(),
+        programs = prog_want.len(),
+        addresses = host_want.len(),
+        "Capability profiles loaded into the kernel"
+    );
+}
+
 fn load_file_access_rules(bpf: &mut Bpf) {
     let path = "/etc/ringzero/file-access-rules.json";
     let data = match std::fs::read_to_string(path) {
@@ -610,11 +1062,17 @@ fn load_file_access_rules(bpf: &mut Bpf) {
         if rule["action"].as_str() != Some("block") {
             continue;
         }
+        // Directory rules go to the directory map. Their last component is not
+        // a file name to refuse everywhere.
         let pattern = match rule["pattern"].as_str() {
             Some(p) => p,
             None => continue,
         };
-        let basenames = crate::api::routes::pattern_to_basenames(pattern);
+        let basenames = if crate::policy::file_rule::is_dir_rule(rule) {
+            crate::api::routes::dir_rule_basenames(pattern)
+        } else {
+            crate::api::routes::pattern_to_basenames(pattern)
+        };
         for name in &basenames {
             let _ = map.insert(make_file_key(name), 1u8, 0);
             count += 1;
@@ -850,7 +1308,10 @@ pub fn apply_command(bpf: &mut Bpf, cmd: &EbpfCommand) {
         EbpfCommand::TrackAgentPid(pid) => {
             if let Some(m) = bpf.map_mut("agent_descendants") {
                 if let Ok(mut map) = AyaHashMap::<_, u32, u8>::try_from(m) {
-                    let _ = map.insert(*pid, 1u8, 0);
+                    // Never overwrite: an existing value may be a profile slot.
+                    if map.get(pid, 0).is_err() {
+                        let _ = map.insert(*pid, 1u8, 0);
+                    }
                     info!(
                         "eBPF: tracking agent PID {} (cmdline-detected) — kernel events captured",
                         pid
@@ -921,6 +1382,26 @@ pub fn apply_command(bpf: &mut Bpf, cmd: &EbpfCommand) {
                         cfg.quarantine_enforce = *on as u8;
                         let _ = map.set(0, cfg, 0);
                         info!(enabled = *on, "eBPF: quarantine_enforce set");
+                    }
+                }
+            }
+        }
+        EbpfCommand::SetControls(c) => apply_controls(bpf, c),
+        EbpfCommand::SyncProfiles(st) => apply_profiles(bpf, st),
+        EbpfCommand::TagProfileSlot { pid, slot } => {
+            if let Some(m) = bpf.map_mut("agent_descendants") {
+                if let Ok(mut map) = AyaHashMap::<_, u32, u8>::try_from(m) {
+                    let _ = map.insert(*pid, *slot, 0);
+                }
+            }
+        }
+        EbpfCommand::SetTamperProtect(on) => {
+            if let Some(m) = bpf.map_mut("config_map") {
+                if let Ok(mut map) = Array::<_, Config>::try_from(m) {
+                    if let Ok(mut cfg) = map.get(&0, 0) {
+                        cfg.tamper_protect = *on as u8;
+                        let _ = map.set(0, cfg, 0);
+                        info!(enabled = *on, "eBPF: tamper protection set");
                     }
                 }
             }
@@ -1107,6 +1588,9 @@ pub fn apply_command(bpf: &mut Bpf, cmd: &EbpfCommand) {
                     info!("eBPF: cleared blocked directory restrictions");
                 }
             }
+            // Clearing the operator's directory rules must never clear Ring
+            // Zero's own protection along with them.
+            apply_self_protection(bpf);
         }
     }
 }
@@ -1188,6 +1672,17 @@ pub enum EbpfCommand {
     SetQuarantineEnforce(bool),
     /// Turn egress narrowing on or off at runtime.
     SetEgressEnforce(bool),
+    SetTamperProtect(bool),
+    /// Re-apply the kernel controls (admin tools, escape tools, instruction files).
+    SetControls(crate::config::ControlsSection),
+    /// Load the capability profiles (slots, programs, addresses) into the kernel.
+    SyncProfiles(crate::policy::capability::KernelProfiles),
+    /// Put a process (an agent found by command line, or an MCP server) under
+    /// a profile. Its children inherit the slot at fork.
+    TagProfileSlot {
+        pid: u32,
+        slot: u8,
+    },
     /// Turn the kernel's taint-on-external-egress signal on or off at runtime.
     SetTaintOnEgress(bool),
     /// Add a destination to the egress allowlist for tainted processes.
@@ -1254,6 +1749,7 @@ pub async fn start(
         // Tamper protection (Phase 3)
         ("ringzero_ptrace_access_check", "ptrace_access_check"),
         ("ringzero_task_kill", "task_kill"),
+        ("ringzero_bpf_syscall", "bpf"),
         ("ringzero_sb_mount", "sb_mount"),
         ("ringzero_sb_umount", "sb_umount"),
         // Enhanced containment enforcement (Phase 4)
@@ -1327,6 +1823,7 @@ pub async fn start(
     for (name, category, tracepoint) in &[
         ("handle_fork", "sched", "sched_process_fork"),
         ("handle_exit", "sched", "sched_process_exit"),
+        ("handle_exec_pkg", "sched", "sched_process_exec"),
     ] {
         let Some(prog) = bpf.program_mut(name) else {
             warn!("Tracepoint program not found: {}", name);
@@ -1390,7 +1887,9 @@ pub async fn start(
                         // bit, but it changes what every other rule sees, so
                         // it is the operator's choice to turn on.
                         taint_on_egress: 0,
-                        _reserved: [0; 1],
+                        // Set from [daemon] tamper_protection right after
+                        // start (on by default); off until then.
+                        tamper_protect: 0,
                     },
                     0,
                 ) {
@@ -1442,6 +1941,9 @@ pub async fn start(
     block_default_files(&mut bpf);
     block_default_inodes(&mut bpf);
     load_file_access_rules(&mut bpf);
+    apply_self_protection(&mut bpf);
+    apply_controls(&mut bpf, &crate::config::DaemonConfig::load().controls);
+    apply_profiles(&mut bpf, &crate::policy::capability::ENGINE.kernel_state());
 
     // Register daemon PID so tamper protection exempts us
     {
@@ -1676,6 +2178,13 @@ pub async fn start(
                     let data: &[u8] = item.as_ref();
                     if data.len() >= std::mem::size_of::<KernelEvent>() {
                         let e = unsafe { &*(data.as_ptr() as *const KernelEvent) };
+                        if e.event_type == 13 {
+                            if let Some(msg) = decide_package_hold(e) {
+                                let _ = tx.try_send(msg);
+                            }
+                            continue;
+                        }
+                        check_interpreter_install(e, tx.clone());
                         let msg = kernel_event_to_driver_msg(e);
                         event_count += 1;
                         if event_count <= 5 || event_count % 100_000 == 0 {

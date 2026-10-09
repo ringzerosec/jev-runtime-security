@@ -139,6 +139,12 @@ pub struct DaemonSecurityEvent {
     pub parent_process: Option<String>,
     #[serde(default)]
     pub llm_context: Option<serde_json::Value>,
+    /// Threat category a classifier put on this event, if any.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Which classifier answered ("rules" until a trained one ships).
+    #[serde(default)]
+    pub classified_by: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -181,6 +187,10 @@ pub struct Event {
     pub parent_process: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm_context: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classified_by: Option<String>,
 }
 
 // ── Daemon IPC client (Unix socket) ───────────────────────────────────────────
@@ -308,8 +318,11 @@ fn http_json(
 
 /// Fetch + parse the event timeline over HTTP. `kind` is an optional
 /// comma-separated filter the HTTP endpoint understands.
-fn http_events(limit: u32, kind: Option<&str>) -> Vec<DaemonSecurityEvent> {
+fn http_events(limit: u32, kind: Option<&str>, blocked: bool) -> Vec<DaemonSecurityEvent> {
     let mut path = format!("/api/v1/events?limit={}", limit.min(1000));
+    if blocked {
+        path.push_str("&blocked=true");
+    }
     if let Some(k) = kind {
         // Event kinds are snake_case identifiers; refuse anything else so the
         // filter can't smuggle extra query parameters.
@@ -346,6 +359,8 @@ fn to_tauri_event(se: DaemonSecurityEvent) -> Event {
         ppid: se.ppid,
         parent_process: se.parent_process,
         llm_context: se.llm_context,
+        category: se.category,
+        classified_by: se.classified_by,
     }
 }
 
@@ -497,9 +512,13 @@ async fn daemon_health() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-async fn get_events(limit: Option<u32>, kind: Option<String>) -> Result<Vec<Event>, String> {
+async fn get_events(
+    limit: Option<u32>,
+    kind: Option<String>,
+    blocked: Option<bool>,
+) -> Result<Vec<Event>, String> {
     let limit = limit.unwrap_or(100);
-    let events = http_events(limit, kind.as_deref());
+    let events = http_events(limit, kind.as_deref(), blocked.unwrap_or(false));
     Ok(events.into_iter().map(to_tauri_event).collect())
 }
 
