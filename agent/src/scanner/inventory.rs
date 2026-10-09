@@ -120,6 +120,8 @@ const AGENTS: &[(&str, &str, &[&str], &[&str])] = &[
     ("amp", "Amp", &["amp"], &[".config/amp"]),
     ("qwen", "Qwen Code", &["qwen"], &[".qwen"]),
     ("claude-desktop", "Claude Desktop", &["claude-desktop"], &[".config/Claude"]),
+    ("hermes", "Hermes Agent", &["hermes"], &[".hermes"]),
+    ("openclaw", "OpenClaw", &["openclaw"], &[".openclaw"]),
 ];
 
 /// (extension id prefix, display name)
@@ -619,6 +621,19 @@ mod tests {
         let claude = inv.agents.iter().find(|a| a.id == "claude").unwrap();
         assert!(claude.binary.as_deref().unwrap().ends_with(".local/bin/claude"));
         assert!(claude.enforcement_covered);
+    }
+
+    #[test]
+    fn finds_general_purpose_agents_too() {
+        let h = fixture();
+        write(&h.join(".local/bin/hermes"), "");
+        std::fs::create_dir_all(h.join(".openclaw")).unwrap();
+        let mut inv = Inventory::default();
+        collect_home("dev", &h, &mut inv);
+        for id in ["hermes", "openclaw"] {
+            let a = inv.agents.iter().find(|a| a.id == id).unwrap_or_else(|| panic!("{id} not found"));
+            assert!(a.enforcement_covered, "{id} is in agent_detect, so it is enforced");
+        }
     }
 
     #[test]
