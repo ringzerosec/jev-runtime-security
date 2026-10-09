@@ -15,6 +15,7 @@ mod fscache;
 mod health;
 mod integrations;
 mod ipc;
+mod narrator;
 mod platform;
 mod policy;
 mod review;
@@ -542,6 +543,26 @@ async fn async_main() -> Result<()> {
 
     // Spawn skill-install watcher
     let ipc_watcher = Arc::clone(&ipc);
+    // Capability profiles carry host NAMES; connect events carry IPs. Keep the
+    // name -> IP map fresh in the background.
+    // Every minute: look the names up again, drop learned addresses whose TTL
+    // ran out, and bring the kernel's copy up to date. Runs even with no
+    // profiles, because one can be added from the app at any time.
+    tracing::info!(
+        profiles = policy::capability::ENGINE.report().len(),
+        enforcing = policy::capability::ENGINE.any_enforced(),
+        "Capability profiles loaded"
+    );
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        loop {
+            policy::capability::ENGINE.refresh_dns().await;
+            policy::capability::ENGINE.expire_learned();
+            policy::capability::sync_kernel().await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    });
+
     let siem_watcher = Arc::clone(&siem);
     let registry_watcher = Arc::clone(&verified_registry);
     let model_armor_cfg = ModelArmorConfig::resolve(&cfg.model_armor);
@@ -729,6 +750,7 @@ async fn async_main() -> Result<()> {
                     slm_l0.attach_l0(cmd_tx.clone()).await;
 
                     // Store sender so daemon event loop can push DLP block decisions
+                    let _ = ebpf_loader::CMD_TX.set(cmd_tx.clone());
                     *cmd_holder.write().await = Some(cmd_tx);
 
                     std::future::pending::<()>().await;
@@ -881,6 +903,75 @@ async fn async_main() -> Result<()> {
                     );
                 }
 
+                // Capability profiles (observe): is this connection or program
+                // start allowed by its agent's / MCP server's profile?
+                if !policy::capability::ENGINE.is_empty()
+                    && matches!(ev.kind, EventKind::NetworkConnect | EventKind::ProcessExec)
+                    && (is_agent || ebpf_loader::was_agent_pid(pid))
+                {
+                    let anc = policy::capability::ancestry(pid);
+                    let agent_of = |p: u32, cmd: &str| {
+                        let comm = cmd
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("");
+                        common::agent_detect::detect_agent_for_pid(p, comm).map(str::to_string)
+                    };
+                    let program = ev
+                        .target
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&ev.target)
+                        .to_string();
+                    let shape = match ev.kind {
+                        EventKind::NetworkConnect => policy::capability::parse_target(&ev.target)
+                            .map(|(ip, port)| policy::capability::EventShape::Connect {
+                                ip,
+                                port,
+                                host: None,
+                            }),
+                        _ => Some(policy::capability::EventShape::Exec { program: &program }),
+                    };
+                    // An MCP server starting: put it under its own profile so the
+                    // kernel judges its tree by that profile, not its agent's.
+                    if matches!(ev.kind, EventKind::ProcessExec) && ev.allowed {
+                        if let Some((_, cmdline)) = anc.first() {
+                            if let Some(slot) = policy::capability::ENGINE.mcp_slot_for(cmdline) {
+                                if let Some(tx) = ebpf_loader::CMD_TX.get() {
+                                    let _ = tx.try_send(ebpf_loader::EbpfCommand::TagProfileSlot {
+                                        pid,
+                                        slot,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    if let Some(shape) = shape {
+                        if let Some(v) = policy::capability::ENGINE.check(
+                            shape,
+                            pid,
+                            &ev.process,
+                            &anc,
+                            agent_of,
+                        ) {
+                            tracing::info!(pid, profile = %v.profile, rule = %v.rule, detail = %v.detail, refused = !ev.allowed, "Outside capability profile");
+                            if ev.reason.is_none() {
+                                ev.reason = Some(if ev.allowed {
+                                    format!(
+                                        "Outside limits (watching) — {}: {}",
+                                        v.profile, v.detail
+                                    )
+                                } else {
+                                    format!("Blocked — {}: {}", v.profile, v.detail)
+                                });
+                            }
+                        }
+                    }
+                }
+
                 // Network policy evaluation
                 if ev.allowed
                     && matches!(
@@ -942,6 +1033,19 @@ async fn async_main() -> Result<()> {
                     pid, process = %ev.process, target = %target, kind = ?ev.kind,
                     allowed = ev.allowed, "Kernel event received"
                 );
+
+                // A thread's name is not its process's: Bun and Node agents do
+                // their work on threads named "HTTP Client" or "Bun Pool 0".
+                // When the thread name is not an agent's, take the process's
+                // own name, so the event is attributed to the agent it belongs to.
+                if !common::agent_detect::is_ai_agent(&ev.process) {
+                    if let Ok(c) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+                        let c = c.trim();
+                        if common::agent_detect::is_ai_agent(c) {
+                            ev.process = c.to_string();
+                        }
+                    }
+                }
 
                 // Kernel → session wiring:
                 // Find the session for this event by PID or process name,
@@ -1472,6 +1576,18 @@ async fn async_main() -> Result<()> {
 
                 // Only persist and analyze events from detected agent sessions
                 // (skip system noise to avoid 100% CPU and log spam)
+                // A helper's event (cat, head, curl) names only the helper. Say
+                // which agent it belongs to, so a refusal reads "opencode tried
+                // to read .env", not "head tried to read .env".
+                if ev.parent_process.is_none() && !common::agent_detect::is_ai_agent(&ev.process) {
+                    if let Some(s) = matched_session_id
+                        .as_deref()
+                        .and_then(|id| sessions_c.get(id))
+                    {
+                        ev.parent_process = Some(s.actor.clone());
+                    }
+                }
+
                 if matched_session_id.is_none() {
                     // Log the process name at debug level so we can diagnose detection
                     tracing::warn!(
@@ -2417,6 +2533,112 @@ async fn async_main() -> Result<()> {
 
     // ── Egress narrowing on taint ─────────────────────────────────────────
     //
+    // Agents that were already running when the daemon started are not in the
+    // kernel's agent map (it is rebuilt on every start), and nothing re-tags a
+    // process that never forks or execs again. Find them, and everything they
+    // started, and tag them with their profile slot.
+    {
+        let handle = Arc::clone(&ebpf_cmd_tx);
+        tokio::spawn(async move {
+            let tx = loop {
+                if let Some(t) = handle.read().await.clone() {
+                    break t;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            };
+            let mut procs: Vec<(u32, u32, String)> = Vec::new();
+            if let Ok(rd) = std::fs::read_dir("/proc") {
+                for e in rd.flatten() {
+                    let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+                        continue;
+                    };
+                    let stat =
+                        std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+                    // "pid (comm) state ppid ...": comm may contain spaces, so split after the last ')'.
+                    let ppid = stat
+                        .rsplit_once(')')
+                        .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(0);
+                    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    procs.push((pid, ppid, comm));
+                }
+            }
+            let mut tagged: std::collections::HashMap<u32, u8> = std::collections::HashMap::new();
+            for (pid, _, comm) in &procs {
+                if common::agent_detect::is_ai_agent(comm) {
+                    let agent =
+                        common::agent_detect::detect_agent_for_pid(*pid, comm).unwrap_or("");
+                    let slot = policy::capability::ENGINE
+                        .slot_for_agent(agent)
+                        .unwrap_or(1);
+                    tagged.insert(*pid, slot);
+                }
+            }
+            // Descendants inherit their agent's slot; repeat until nothing changes.
+            loop {
+                let mut grew = false;
+                for (pid, ppid, _) in &procs {
+                    if !tagged.contains_key(pid) {
+                        if let Some(&slot) = tagged.get(ppid) {
+                            tagged.insert(*pid, slot);
+                            grew = true;
+                        }
+                    }
+                }
+                if !grew {
+                    break;
+                }
+            }
+            for (pid, slot) in &tagged {
+                let _ = tx
+                    .send(ebpf_loader::EbpfCommand::TagProfileSlot {
+                        pid: *pid,
+                        slot: *slot,
+                    })
+                    .await;
+            }
+            if !tagged.is_empty() {
+                tracing::info!(
+                    processes = tagged.len(),
+                    "Re-tagged agents already running at startup, with everything they started"
+                );
+            }
+        });
+    }
+
+    // Tamper protection, on by default. Sent as soon as the eBPF subsystem is
+    // up; until then the daemon is as killable as any process.
+    {
+        let handle = Arc::clone(&ebpf_cmd_tx);
+        let on = cfg.daemon.tamper_protection;
+        tokio::spawn(async move {
+            for _ in 0..60 {
+                if let Some(tx) = handle.read().await.clone() {
+                    let _ = tx
+                        .send(ebpf_loader::EbpfCommand::SetTamperProtect(on))
+                        .await;
+                    if on {
+                        tracing::info!(
+                            "Tamper protection ON: only systemd may signal the daemon, nobody may \
+                             debug it, and agent process trees may not use bpf()"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "Tamper protection is OFF ([daemon] tamper_protection = false)"
+                        );
+                    }
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            tracing::warn!("tamper protection: eBPF subsystem never came up; NOT active");
+        });
+    }
+
     // Seed the allowlist and set the enforce flag once the eBPF subsystem is
     // up. Loopback is handled in the kernel inline; the LLM endpoints and the
     // operator's own entries are pushed here. OFF by default: flipping
@@ -2543,6 +2765,21 @@ async fn async_main() -> Result<()> {
                 if let Ok(guard) = scan_cmd.try_read() {
                     if let Some(tx) = guard.as_ref() {
                         let _ = tx.try_send(ebpf_loader::EbpfCommand::TrackAgentPid(pid));
+                        // An agent found by command line (it runs as node or
+                        // python) gets its profile here; the kernel cannot
+                        // recognise it by name.
+                        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                            .unwrap_or_default();
+                        if let Some(agent) =
+                            common::agent_detect::detect_agent_for_pid(pid, comm.trim())
+                        {
+                            if let Some(slot) = policy::capability::ENGINE.slot_for_agent(agent) {
+                                let _ = tx.try_send(ebpf_loader::EbpfCommand::TagProfileSlot {
+                                    pid,
+                                    slot,
+                                });
+                            }
+                        }
                     }
                 }
             };

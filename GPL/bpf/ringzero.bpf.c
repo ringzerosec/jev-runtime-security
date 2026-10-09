@@ -31,6 +31,7 @@ enum event_type {
     EVENT_PROCESS_EXEC = 10,
     EVENT_PROCESS_FORK = 11,
     EVENT_PROCESS_EXIT = 12,
+    EVENT_PKG_HOLD = 13,      // an agent's package manager, stopped for a decision
     EVENT_NETWORK_CONNECT = 20,
     EVENT_NETWORK_SEND = 30,
     EVENT_MPROTECT_WX = 25,
@@ -176,6 +177,84 @@ struct {
     __type(value, u8);
 } blocked_processes SEC(".maps");
 
+// Programs an agent process tree may not run, by executable basename (the
+// dentry of the file actually executed, so a symlink such as run0 resolves to
+// its target). Value: which control put it there (1 admin tools, 2 escape
+// tools). Empty means the controls are off. Refused only when enforce_blocks.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_COMM_LEN]);
+    __type(value, u8);
+} agent_denied_programs SEC(".maps");
+
+// Files an agent process tree may READ but not change: open for write,
+// create, rename onto or away from, delete, or hardlink. Keyed by basename,
+// like blocked_files. These are the files that instruct agents, so changing
+// one changes what every later session is told to do.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_PATH_LEN]);
+    __type(value, u8);
+} agent_readonly_names SEC(".maps");
+
+// ── Capability profiles, enforced ─────────────────────────────────────────
+//
+// Every process in an agent tree carries a value in agent_descendants: 1 for
+// "an agent, no profile", 2..255 for the profile slot it belongs to. The slot
+// is set when the agent starts (by its process name, agent_profile_by_name, or
+// by the daemon for agents it recognises by command line) and copied to every
+// child at fork. A profile in enforce mode then decides, at the call itself,
+// which programs the tree may start and which addresses it may reach.
+struct profile_policy {
+    u8 programs_enforce;  // refuse programs not in profile_programs
+    u8 allow_spawn;       // 0: may not start any program
+    u8 network_enforce;   // refuse destinations not in profile_hosts
+    u8 _pad;
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 256);
+    __type(key, u32);
+    __type(value, struct profile_policy);
+} profile_policy_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, char[MAX_COMM_LEN]);
+    __type(value, u8);
+} agent_profile_by_name SEC(".maps");
+
+struct prog_key {
+    u8 slot;
+    char name[MAX_COMM_LEN];
+    u8 _pad[3];
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 8192);
+    __type(key, struct prog_key);
+    __type(value, u8);
+} profile_programs SEC(".maps");
+
+// Longest-prefix match over (slot, IPv4), so a profile can approve a single
+// address (prefix 32+32) or a range (32 + CIDR bits).
+struct host_key {
+    u32 prefixlen;
+    u8 slot;
+    u8 _pad[3];
+    u32 ip;
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __uint(max_entries, 16384);
+    __type(key, struct host_key);
+    __type(value, u8);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} profile_hosts SEC(".maps");
+
 // Blocked network destinations (IP:port)
 // Key: IP address (network byte order)
 // Value: 1 = blocked
@@ -245,7 +324,12 @@ struct config {
     // normal session taints before enforcing on it. Takes the third reserved
     // byte; the struct size and the Rust mirror are unchanged.
     u8 taint_on_egress;
-    u8 _reserved[1];
+    // Tamper protection. SEPARATE from enforce_blocks: the daemon, its memory
+    // and the BPF subsystem are protected even when every other rule is only
+    // observing, because an observing product that can be switched off is no
+    // product. Takes the last reserved byte; struct size and Rust mirror are
+    // unchanged.
+    u8 tamper_protect;
 };
 
 // DLP: Tainted PIDs (processes that read sensitive/credential files)
@@ -476,96 +560,7 @@ static __always_inline struct proxy_config *get_proxy_config(void) {
 }
 
 // Check if this is an AI agent process or child of one
-static __always_inline int is_ai_agent(const char *comm) {
-    // Known AI agent process names
-
-    // "claude" (matches claude, claude.real, claude-code, etc.)
-    if (comm[0] == 'c' && comm[1] == 'l' && comm[2] == 'a' && comm[3] == 'u' && comm[4] == 'd' && comm[5] == 'e')
-        return 1;
-
-    // "cursor"
-    if (comm[0] == 'c' && comm[1] == 'u' && comm[2] == 'r' && comm[3] == 's' && comm[4] == 'o' && comm[5] == 'r')
-        return 1;
-
-    // "copilot"
-    if (comm[0] == 'c' && comm[1] == 'o' && comm[2] == 'p' && comm[3] == 'i' && comm[4] == 'l' && comm[5] == 'o')
-        return 1;
-
-    // "codex"
-    if (comm[0] == 'c' && comm[1] == 'o' && comm[2] == 'd' && comm[3] == 'e' && comm[4] == 'x')
-        return 1;
-
-    // "ChatGPT" — OpenAI ChatGPT/Codex desktop app (Electron). Every process it
-    // spawns (main, zygote, renderer, gpu, network/storage utility) shares the
-    // comm "ChatGPT", so this one prefix covers the whole app. comm is compared
-    // case-sensitively, so match the app's real casing, plus the lowercase form.
-    if (comm[0] == 'C' && comm[1] == 'h' && comm[2] == 'a' && comm[3] == 't' &&
-        comm[4] == 'G' && comm[5] == 'P' && comm[6] == 'T')
-        return 1;
-    if (comm[0] == 'c' && comm[1] == 'h' && comm[2] == 'a' && comm[3] == 't' &&
-        comm[4] == 'g' && comm[5] == 'p' && comm[6] == 't')
-        return 1;
-
-    // "devin"
-    if (comm[0] == 'd' && comm[1] == 'e' && comm[2] == 'v' && comm[3] == 'i' && comm[4] == 'n')
-        return 1;
-
-    // "aider"
-    if (comm[0] == 'a' && comm[1] == 'i' && comm[2] == 'd' && comm[3] == 'e' && comm[4] == 'r')
-        return 1;
-
-    // "windsurf" (Codeium IDE)
-    if (comm[0] == 'w' && comm[1] == 'i' && comm[2] == 'n' && comm[3] == 'd' && comm[4] == 's')
-        return 1;
-
-    // "agy" (Antigravity CLI — Google Gemini successor)
-    if (comm[0] == 'a' && comm[1] == 'g' && comm[2] == 'y')
-        return 1;
-
-    // "antigravity"
-    if (comm[0] == 'a' && comm[1] == 'n' && comm[2] == 't' && comm[3] == 'i' && comm[4] == 'g')
-        return 1;
-
-    // "gemini" (legacy)
-    if (comm[0] == 'g' && comm[1] == 'e' && comm[2] == 'm' && comm[3] == 'i' && comm[4] == 'n' && comm[5] == 'i')
-        return 1;
-
-    // "gemini" (Gemini CLI)
-    if (comm[0] == 'g' && comm[1] == 'e' && comm[2] == 'm' && comm[3] == 'i' && comm[4] == 'n' && comm[5] == 'i')
-        return 1;
-
-    // "agent" — Cursor CLI binary (cursor-agent renames to "agent")
-    if (comm[0] == 'a' && comm[1] == 'g' && comm[2] == 'e' && comm[3] == 'n' && comm[4] == 't' && comm[5] == '\0')
-        return 1;
-
-    // "MainThread" — Cursor/Python agent main process (Python renames comm via prctl).
-    // Must be in is_ai_agent (not just is_runtime) because this IS the top-level
-    // agent process — it has no agent ancestor, so is_agent_child() would fail.
-    if (comm[0] == 'M' && comm[1] == 'a' && comm[2] == 'i' && comm[3] == 'n' &&
-        comm[4] == 'T' && comm[5] == 'h' && comm[6] == 'r' && comm[7] == 'e')
-        return 1;
-
-    // "opencode"
-    if (comm[0] == 'o' && comm[1] == 'p' && comm[2] == 'e' && comm[3] == 'n' && comm[4] == 'c')
-        return 1;
-
-    // "hermes"
-    if (comm[0] == 'h' && comm[1] == 'e' && comm[2] == 'r' && comm[3] == 'm' && comm[4] == 'e' && comm[5] == 's')
-        return 1;
-
-    // Any "claw"-family agent: comm CONTAINS the substring "claw"
-    // (nanoclaw, nemoclaw, openclaw, closedclaw, trustclaw, ...). Bounded
-    // substring scan over the 16-byte comm; unrolled for the verifier.
-    #pragma unroll
-    for (int i = 0; i + 3 < MAX_COMM_LEN; i++) {
-        if (comm[i] == '\0')
-            break;
-        if (comm[i] == 'c' && comm[i+1] == 'l' && comm[i+2] == 'a' && comm[i+3] == 'w')
-            return 1;
-    }
-
-    return 0;
-}
+#include "agent_names.h"
 
 // Check if any ancestor (up to 4 levels) is an AI agent
 // Raise taint on a pid. Raise-only: an existing entry is never downgraded, and
@@ -725,10 +720,41 @@ static __always_inline int should_monitor_process(const char *comm) {
 // that actually create/delete files, connect out, and exec — whose comm isn't an
 // agent name but whose pid is in agent_descendants. Without it, only the agent's
 // own pid was monitored, so the session showed almost no activity.
+// Is the current process an agent, judged by the PROCESS, not the thread?
+//
+// comm is per thread. Runtimes such as Bun and Node do file I/O on worker
+// threads with their own names ("Bun Pool 0"), so a thread can say nothing
+// about being an agent while its process is one. The process is tagged in
+// agent_descendants when it starts, but an agent that was already running
+// when the daemon (re)started was never tagged, and its worker threads read
+// protected files. Checking the main thread's name closes that: an agent's
+// main thread carries its name, and finding one tags the process on the spot.
+static __always_inline int current_process_is_agent(const char *comm) {
+    u32 tgid = bpf_get_current_pid_tgid() >> 32;
+    if (bpf_map_lookup_elem(&agent_descendants, &tgid))
+        return 1;
+    char lc[MAX_COMM_LEN] = {};
+    if (is_ai_agent(comm)) {
+        __builtin_memcpy(lc, comm, MAX_COMM_LEN);
+    } else {
+        struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+        struct task_struct *leader = BPF_CORE_READ(task, group_leader);
+        if (!leader)
+            return 0;
+        bpf_core_read_str(lc, sizeof(lc), &leader->comm);
+        if (!is_ai_agent(lc))
+            return 0;
+    }
+    u8 slot = 1;
+    u8 *ns = bpf_map_lookup_elem(&agent_profile_by_name, lc);
+    if (ns)
+        slot = *ns;
+    bpf_map_update_elem(&agent_descendants, &tgid, &slot, BPF_NOEXIST);
+    return 1;
+}
+
 static __always_inline int is_monitored_current(const char *comm) {
-    u32 pid = bpf_get_current_pid_tgid() >> 32;
-    return is_ai_agent(comm) || should_monitor_process(comm)
-        || bpf_map_lookup_elem(&agent_descendants, &pid) != 0;
+    return current_process_is_agent(comm) || should_monitor_process(comm);
 }
 
 // Is this dentry inside a blocked directory?
@@ -815,6 +841,72 @@ static __always_inline int is_dentry_protected(struct dentry *dentry) {
         return 1;
 
     return 0;
+}
+
+// Is this dentry's basename one agents may read but not change?
+static __always_inline int is_readonly_name(struct dentry *dentry) {
+    if (!dentry)
+        return 0;
+    char name[MAX_PATH_LEN] = {};
+    bpf_probe_read_kernel_str(name, MAX_PATH_LEN, BPF_CORE_READ(dentry, d_name.name));
+    return bpf_map_lookup_elem(&agent_readonly_names, name) != 0;
+}
+
+// The profile slot of the current process: 0 not an agent, 1 an agent with
+// no profile, 2..255 a profile.
+static __always_inline u8 current_profile_slot(void) {
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    u8 *v = bpf_map_lookup_elem(&agent_descendants, &pid);
+    return v ? *v : 0;
+}
+
+static __always_inline struct profile_policy *profile_policy_for(u8 slot) {
+    if (slot < 2)
+        return 0;
+    u32 k = slot;
+    return bpf_map_lookup_elem(&profile_policy_map, &k);
+}
+
+// Would the current process's profile refuse this destination? IPv4 in `ip`
+// (network order); for IPv6 pass the 16 address bytes. A v4-mapped IPv6
+// address is judged as the IPv4 it carries. Loopback, DNS, the model
+// endpoints (key_allowed_ips, and egress_allowed_ips which learns them from
+// DNS answers) are always allowed so a profile cannot cut an agent off from
+// its own model. Other IPv6 is refused: the allowlist is IPv4.
+static __always_inline int profile_net_denied(u16 family, u32 ip, const u8 *v6, u16 port) {
+    u8 slot = current_profile_slot();
+    struct profile_policy *pp = profile_policy_for(slot);
+    if (!pp || !pp->network_enforce)
+        return 0;
+    if (port == 53)
+        return 0;
+    if (family == AF_INET6) {
+        int zero10 = 1;
+        #pragma unroll
+        for (int i = 0; i < 10; i++)
+            if (v6[i]) zero10 = 0;
+        if (zero10 && v6[10] == 0xff && v6[11] == 0xff) {
+            __builtin_memcpy(&ip, &v6[12], 4);
+            family = AF_INET;
+        } else {
+            int loop = zero10 && !v6[10] && !v6[11] && !v6[12] && !v6[13] && !v6[14] && v6[15] == 1;
+            return !loop;
+        }
+    }
+    if (family != AF_INET)
+        return 0;
+    if ((ip & 0xff) == 127)
+        return 0;
+    if (bpf_map_lookup_elem(&key_allowed_ips, &ip))
+        return 0;
+    // Model endpoints learned from DNS answers, plus operator-approved egress.
+    if (bpf_map_lookup_elem(&egress_allowed_ips, &ip))
+        return 0;
+    struct host_key hk = {};
+    hk.prefixlen = 64;
+    hk.slot = slot;
+    hk.ip = ip;
+    return bpf_map_lookup_elem(&profile_hosts, &hk) == 0;
 }
 
 // Check if filename is sensitive (worth reporting)
@@ -937,6 +1029,16 @@ static __always_inline void dlp_taint_current(void) {
     bpf_map_update_elem(&tainted_pids, &pid, &ti, BPF_ANY);
 }
 
+// A refused open records the file's FULL path, in e->args (unused for file
+// events), so the record can say which "secrets" or ".env" it was. Only
+// refusals pay for this; e->path keeps the name the rules matched.
+static __always_inline void record_refused_path(struct event *e, struct file *file) {
+    __builtin_memset(e->args, 0, MAX_ARGS_LEN);
+    long n = bpf_d_path(&file->f_path, e->args, MAX_ARGS_LEN);
+    if (n < 0)
+        e->args[0] = '\0';
+}
+
 SEC("lsm/file_open")
 int BPF_PROG(ringzero_file_open, struct file *file) {
     struct config *cfg = get_config();
@@ -953,7 +1055,7 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
     // Monitored if this is an agent process itself OR a PID tainted as an
     // agent descendant (tagged at fork — survives reparenting, O(1) lookup).
     u32 cur_pid = bpf_get_current_pid_tgid() >> 32;
-    int agent = is_ai_agent(comm) || bpf_map_lookup_elem(&agent_descendants, &cur_pid);
+    int agent = current_process_is_agent(comm);
     if (!agent) {
         // Self-healing fallback for trees that predate the daemon (or a restart),
         // where the fork tag was never recorded: language runtimes (node/python/
@@ -1045,6 +1147,17 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
         return 0;
     }
 
+    // Agent instruction files: readable, never writable by an agent tree.
+    if (cfg->enforce_blocks) {
+        unsigned int ro_mode = BPF_CORE_READ(file, f_mode);
+        if ((ro_mode & RZ_FMODE_WRITE) && bpf_map_lookup_elem(&agent_readonly_names, e->path)) {
+            e->blocked = 1;
+            record_refused_path(e, file);
+            bpf_ringbuf_submit(e, 0);
+            return -EACCES;
+        }
+    }
+
     // Check if file is blocked — by basename (broad net) OR by identity (dev+ino).
     // The identity check defeats rename/hardlink: the basename in e->path may be
     // innocuous ("/tmp/x") while the underlying inode is a registered secret.
@@ -1070,6 +1183,7 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
         u8 one = 1;
         bpf_map_update_elem(&file_open_block_dedup, &caller_pid, &one, BPF_ANY);
         e->blocked = 1;
+            record_refused_path(e, file);
         bpf_ringbuf_submit(e, 0);
         return -EACCES;
     }
@@ -1091,6 +1205,7 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
             struct write_verdict *v = bpf_map_lookup_elem(&agent_write_verdicts, &qk);
             if (v && v->enforce && cfg->quarantine_enforce) {
                 e->blocked = 1;
+            record_refused_path(e, file);
                 bpf_ringbuf_submit(e, 0);
                 return -EACCES;
             }
@@ -1142,6 +1257,7 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
             }
             if (!in_allowed) {
                 e->blocked = 1;
+            record_refused_path(e, file);
                 bpf_ringbuf_submit(e, 0);
                 return -EACCES;
             }
@@ -1161,6 +1277,7 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
             int in_blocked = dentry_under_blocked_dir(dentry);
             if (in_blocked) {
                 e->blocked = 1;
+            record_refused_path(e, file);
                 bpf_ringbuf_submit(e, 0);
                 return -EACCES;
             }
@@ -1205,8 +1322,9 @@ int BPF_PROG(ringzero_inode_create, struct inode *dir, struct dentry *dentry, um
     if (!is_monitored_current(comm))
         return 0;
 
-    // Block agent creating files in protected directories or with protected names
-    if (cfg->enforce_blocks && dentry && is_dentry_protected(dentry)) {
+    // Block agent creating files in protected directories or with protected
+    // names, or creating an agent instruction file.
+    if (cfg->enforce_blocks && dentry && (is_dentry_protected(dentry) || is_readonly_name(dentry))) {
         struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
         if (e) {
             e->type = EVENT_FILE_CREATE;
@@ -1242,8 +1360,9 @@ int BPF_PROG(ringzero_inode_unlink, struct inode *dir, struct dentry *dentry) {
     if (!is_monitored_current(comm))
         return 0;
 
-    // Block agent deleting protected files or files in protected directories
-    if (cfg->enforce_blocks && dentry && is_dentry_protected(dentry)) {
+    // Block agent deleting protected files, files in protected directories,
+    // or agent instruction files.
+    if (cfg->enforce_blocks && dentry && (is_dentry_protected(dentry) || is_readonly_name(dentry))) {
         struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
         if (e) {
             e->type = EVENT_FILE_DELETE;
@@ -1282,8 +1401,8 @@ int BPF_PROG(ringzero_inode_rename, struct inode *old_dir, struct dentry *old_de
         return 0;
 
     // Block if EITHER source or destination is protected
-    int src_protected = old_dentry && is_dentry_protected(old_dentry);
-    int dst_protected = new_dentry && is_dentry_protected(new_dentry);
+    int src_protected = old_dentry && (is_dentry_protected(old_dentry) || is_readonly_name(old_dentry));
+    int dst_protected = new_dentry && (is_dentry_protected(new_dentry) || is_readonly_name(new_dentry));
 
     if (src_protected || dst_protected) {
         struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -1329,7 +1448,8 @@ int BPF_PROG(ringzero_inode_link, struct dentry *old_dentry, struct inode *dir,
     if (!is_monitored_current(comm))
         return 0;
 
-    if (old_dentry && is_dentry_protected(old_dentry)) {
+    if ((old_dentry && is_dentry_protected(old_dentry))
+        || (new_dentry && is_readonly_name(new_dentry))) {
         struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
         if (e) {
             e->type = EVENT_FILE_CREATE; // a hardlink creates a new name
@@ -1420,6 +1540,53 @@ int BPF_PROG(ringzero_bprm_check, struct linux_binprm *bprm) {
         int agent_lineage = bpf_map_lookup_elem(&agent_descendants, &self_pid) != 0
                          || is_ai_agent(parent_comm)
                          || is_agent_child();
+        // Kernel controls: programs an agent tree may not run at all (admin
+        // tools, escape tools). Decided by list membership only; the list is
+        // filled by the daemon from the operator's switches.
+        if (cfg->enforce_blocks && agent_lineage
+            && bpf_map_lookup_elem(&agent_denied_programs, exec_name)) {
+            struct event *de = bpf_ringbuf_reserve(&events, sizeof(*de), 0);
+            if (de) {
+                de->type = EVENT_PROCESS_EXEC;
+                de->blocked = 1;
+                fill_process_info(de);
+                __builtin_memset(de->path, 0, MAX_PATH_LEN);
+                __builtin_memcpy(de->path, exec_name, MAX_COMM_LEN);
+                bpf_ringbuf_submit(de, 0);
+            }
+            return -EACCES;
+        }
+        // Capability profile, programs half. Only a profile in enforce mode
+        // refuses; an agent re-executing itself is always allowed.
+        if (cfg->enforce_blocks) {
+            u8 pslot = current_profile_slot();
+            struct profile_policy *pp = profile_policy_for(pslot);
+            if (pp && pp->programs_enforce) {
+                int ok = 0;
+                u8 *self_slot = bpf_map_lookup_elem(&agent_profile_by_name, exec_name);
+                if (self_slot && *self_slot == pslot)
+                    ok = 1;
+                if (!ok && pp->allow_spawn) {
+                    struct prog_key pk = {};
+                    pk.slot = pslot;
+                    __builtin_memcpy(pk.name, exec_name, MAX_COMM_LEN);
+                    if (bpf_map_lookup_elem(&profile_programs, &pk))
+                        ok = 1;
+                }
+                if (!ok) {
+                    struct event *pe = bpf_ringbuf_reserve(&events, sizeof(*pe), 0);
+                    if (pe) {
+                        pe->type = EVENT_PROCESS_EXEC;
+                        pe->blocked = 1;
+                        fill_process_info(pe);
+                        __builtin_memset(pe->path, 0, MAX_PATH_LEN);
+                        __builtin_memcpy(pe->path, exec_name, MAX_COMM_LEN);
+                        bpf_ringbuf_submit(pe, 0);
+                    }
+                    return -EACCES;
+                }
+            }
+        }
         if (cfg->enforce_blocks && agent_lineage && is_launder_tool(exec_name)) {
             struct event *le = bpf_ringbuf_reserve(&events, sizeof(*le), 0);
             if (le) {
@@ -1463,8 +1630,11 @@ int BPF_PROG(ringzero_bprm_check, struct linux_binprm *bprm) {
     // shell and never forked.
     if (is_ai_agent(exec_name)) {
         u32 ap = bpf_get_current_pid_tgid() >> 32;
-        u8 one = 1;
-        bpf_map_update_elem(&agent_descendants, &ap, &one, BPF_ANY);
+        u8 aslot = 1;
+        u8 *ns = bpf_map_lookup_elem(&agent_profile_by_name, exec_name);
+        if (ns)
+            aslot = *ns;
+        bpf_map_update_elem(&agent_descendants, &ap, &aslot, BPF_ANY);
     }
 
     // Track: AI agent parents spawning children, OR new AI agent processes
@@ -1557,11 +1727,24 @@ int handle_fork(struct trace_event_raw_sched_process_fork *ctx) {
     char pcomm[MAX_COMM_LEN] = {};
     bpf_get_current_comm(pcomm, sizeof(pcomm));
     u32 ppid = (u32)ctx->parent_pid;
-    if (!is_ai_agent(pcomm) && !bpf_map_lookup_elem(&agent_descendants, &ppid))
+    // The child gets the parent's profile slot. A parent that IS an agent by
+    // name takes its profile from agent_profile_by_name, which is how a
+    // profile follows an agent that renamed itself after starting.
+    u8 slot = 0;
+    u8 *pv = bpf_map_lookup_elem(&agent_descendants, &ppid);
+    if (pv)
+        slot = *pv;
+    if (is_ai_agent(pcomm)) {
+        u8 *ns = bpf_map_lookup_elem(&agent_profile_by_name, pcomm);
+        if (ns)
+            slot = *ns;
+        else if (!slot)
+            slot = 1;
+    }
+    if (!slot)
         return 0;
     u32 cpid = (u32)ctx->child_pid;
-    u8 one = 1;
-    bpf_map_update_elem(&agent_descendants, &cpid, &one, BPF_ANY);
+    bpf_map_update_elem(&agent_descendants, &cpid, &slot, BPF_ANY);
 
     // Propagate DLP taint down the fork too: a child forked by a process that
     // holds sensitive data inherits the taint. This is what makes the exfil
@@ -1576,11 +1759,66 @@ int handle_fork(struct trace_event_raw_sched_process_fork *ctx) {
     return 0;
 }
 
+// ── Package installs by agents ──────────────────────────────────────────────
+// [0] = 1 when the "agents can't install packages" control is on.
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u8);
+} pkg_guard SEC(".maps");
+
+// A process in an agent's tree has just become a package manager. Stop it
+// before it runs a single instruction and ask the daemon. The kernel cannot
+// cheaply tell `npm test` from `npm install`; the daemon reads the whole
+// command line, resumes it when it does not add or fetch packages, and kills
+// it when it does. While it waits it can do nothing.
+//
+// At this tracepoint the new image is in place, so comm is the program that
+// was run ("npm", "pip3"), even when a shebang hands it to an interpreter.
+SEC("tp/sched/sched_process_exec")
+int handle_exec_pkg(void *ctx) {
+    struct config *cfg = get_config();
+    if (!cfg || !cfg->enabled || !cfg->enforce_blocks)
+        return 0;
+    u32 zero = 0;
+    u8 *on = bpf_map_lookup_elem(&pkg_guard, &zero);
+    if (!on || !*on)
+        return 0;
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    if (!bpf_map_lookup_elem(&agent_descendants, &pid))
+        return 0;
+    char comm[MAX_COMM_LEN] = {};
+    bpf_get_current_comm(comm, sizeof(comm));
+    if (!is_package_manager(comm))
+        return 0;
+    // No room to ask means nobody would ever resume it: let it run instead of
+    // leaving it stopped forever. The daemon still sees the exec.
+    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_drop_counter(0);
+        return 0;
+    }
+    bpf_send_signal(19); // SIGSTOP
+    e->type = EVENT_PKG_HOLD;
+    e->blocked = 0;
+    fill_process_info(e);
+    __builtin_memset(e->path, 0, MAX_PATH_LEN);
+    __builtin_memset(e->args, 0, MAX_ARGS_LEN);
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
 SEC("tp/sched/sched_process_exit")
 int handle_exit(void *ctx) {
     // Drop the taint when the process exits (LRU also bounds the map, so a missed
     // exit can't leak). Pure bookkeeping, no event.
-    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    // This tracepoint fires for every THREAD that exits. Only the thread-group
+    // leader's exit ends the process; a worker thread exiting must not untag it.
+    u64 id = bpf_get_current_pid_tgid();
+    u32 pid = id >> 32;
+    if ((u32)id != pid)
+        return 0;
     bpf_map_delete_elem(&agent_descendants, &pid);
     bpf_map_delete_elem(&tainted_pids, &pid); // drop DLP taint too (HASH, not LRU)
     return 0;
@@ -1733,7 +1971,18 @@ int BPF_PROG(ringzero_socket_connect, struct socket *sock,
     // stays exactly what it was: observe-only, return 0. The other
     // observe-only returns in this file were backed out deliberately and are
     // not touched.
-    int enforce_now = cfg->egress_enforce && should_block;
+    // Capability profile, network half: its own decision, independent of
+    // egress_enforce, taken only when the profile is in enforce mode.
+    int profile_block = 0;
+    if (cfg->enforce_blocks) {
+        u8 v6b[16] = {};
+        if (family == AF_INET6) {
+            struct sockaddr_in6 *a6 = (struct sockaddr_in6 *)address;
+            bpf_probe_read_kernel(v6b, 16, &a6->sin6_addr);
+        }
+        profile_block = profile_net_denied(family, ip, v6b, port);
+    }
+    int enforce_now = (cfg->egress_enforce && should_block) || profile_block;
 
     // Determine event type: DNS query (UDP port 53) or regular connect
     u32 evt_type = EVENT_NETWORK_CONNECT;
@@ -1765,7 +2014,46 @@ SEC("lsm/socket_sendmsg")
 int BPF_PROG(ringzero_socket_sendmsg, struct socket *sock,
              struct msghdr *msg, int size) {
     struct config *cfg = get_config();
-    if (!cfg || !cfg->enabled || !cfg->dlp_enabled)
+    if (!cfg || !cfg->enabled)
+        return 0;
+
+    // A datagram sent with an explicit address (sendto without connect) never
+    // passes socket_connect, so a profile's network limit is checked here too.
+    if (cfg->enforce_blocks && current_profile_slot() >= 2) {
+        void *name = BPF_CORE_READ(msg, msg_name);
+        if (name) {
+            u16 fam = 0;
+            bpf_probe_read_kernel(&fam, sizeof(fam), name);
+            u32 dip = 0;
+            u16 dport = 0;
+            u8 v6b[16] = {};
+            if (fam == AF_INET) {
+                struct sockaddr_in a4 = {};
+                bpf_probe_read_kernel(&a4, sizeof(a4), name);
+                dip = a4.sin_addr.s_addr;
+                dport = __bpf_ntohs(a4.sin_port);
+            } else if (fam == AF_INET6) {
+                struct sockaddr_in6 a6 = {};
+                bpf_probe_read_kernel(&a6, sizeof(a6), name);
+                __builtin_memcpy(v6b, &a6.sin6_addr, 16);
+                dport = __bpf_ntohs(a6.sin6_port);
+            }
+            if ((fam == AF_INET || fam == AF_INET6) && profile_net_denied(fam, dip, v6b, dport)) {
+                struct event *ne = bpf_ringbuf_reserve(&events, sizeof(*ne), 0);
+                if (ne) {
+                    ne->type = EVENT_NETWORK_CONNECT;
+                    ne->blocked = 1;
+                    fill_process_info(ne);
+                    ne->remote_ip = dip;
+                    ne->remote_port = dport;
+                    bpf_ringbuf_submit(ne, 0);
+                }
+                return -EACCES;
+            }
+        }
+    }
+
+    if (!cfg->dlp_enabled)
         return 0;
 
     // Only inspect AI agent processes
@@ -2013,11 +2301,46 @@ static __always_inline int is_contained(u32 pid) {
 SEC("lsm/ptrace_access_check")
 int BPF_PROG(ringzero_ptrace_access_check, struct task_struct *child, unsigned int mode) {
     struct config *cfg = get_config();
-    if (!cfg || !cfg->enabled || !cfg->enforce_blocks)
+    if (!cfg || !cfg->enabled)
         return 0;
 
     // Get target PID (the process being ptrace'd)
     u32 target_pid = BPF_CORE_READ(child, tgid);
+
+    // TAMPER PROTECTION. Nobody attaches a debugger to the daemon or reads or
+    // writes its memory (ptrace, process_vm_readv/writev and /proc/<pid>/mem
+    // all pass through this check). Root included.
+    //
+    // READ-mode checks (PTRACE_MODE_READ, 0x1, without ATTACH) are what the
+    // kernel asks for when something reads process metadata: the exe link,
+    // open fds, environ. systemd-journald does this for every line the daemon
+    // logs, so refusing it to everyone made each log line a false tamper
+    // event. Debugging and memory access always need ATTACH (0x2) and stay
+    // refused to everyone; READ stays refused to agent trees.
+    if (cfg->tamper_protect && is_daemon_pid(target_pid)) {
+        u32 tcaller = bpf_get_current_pid_tgid() >> 32;
+        char tcomm[MAX_COMM_LEN] = {};
+        bpf_get_current_comm(tcomm, sizeof(tcomm));
+        int attach = (mode & 0x2) != 0;
+        int agent_caller = is_ai_agent(tcomm)
+                        || bpf_map_lookup_elem(&agent_descendants, &tcaller) != 0;
+        if (tcaller != target_pid && (attach || agent_caller)) {
+            struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+            if (e) {
+                e->type = EVENT_PROCESS_EXEC;
+                e->blocked = 1;
+                fill_process_info(e);
+                __builtin_memset(e->path, 0, MAX_PATH_LEN);
+                const char m[] = "TAMPER:daemon_ptrace_refused";
+                __builtin_memcpy(e->path, m, sizeof(m));
+                bpf_ringbuf_submit(e, 0);
+            }
+            return -EACCES;
+        }
+    }
+
+    if (!cfg->enforce_blocks)
+        return 0;
 
     // Only protect contained processes
     if (!is_contained(target_pid))
@@ -2054,11 +2377,35 @@ int BPF_PROG(ringzero_ptrace_access_check, struct task_struct *child, unsigned i
 SEC("lsm/task_kill")
 int BPF_PROG(ringzero_task_kill, struct task_struct *target, struct kernel_siginfo *info, int sig, const struct cred *cred) {
     struct config *cfg = get_config();
-    if (!cfg || !cfg->enabled || !cfg->enforce_blocks)
+    if (!cfg || !cfg->enabled)
         return 0;
 
     u32 target_pid = BPF_CORE_READ(target, tgid);
     u32 caller_pid = bpf_get_current_pid_tgid() >> 32;
+
+    // TAMPER PROTECTION. No process may signal the daemon — root included —
+    // except the daemon itself and pid 1. pid 1 is systemd: it delivers
+    // reload, shutdown and the operator's stop, and the unit decides which of
+    // those are allowed. Signal 0 is an existence check and stays allowed.
+    // Every refusal is reported.
+    if (cfg->tamper_protect && sig != 0 && is_daemon_pid(target_pid)
+        && caller_pid != target_pid && caller_pid != 1) {
+        struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+        if (e) {
+            e->type = EVENT_PROCESS_EXEC;
+            e->blocked = 1;
+            fill_process_info(e);
+            __builtin_memset(e->path, 0, MAX_PATH_LEN);
+            const char m[] = "TAMPER:daemon_signal_refused";
+            __builtin_memcpy(e->path, m, sizeof(m));
+            e->remote_port = (u16)sig;
+            bpf_ringbuf_submit(e, 0);
+        }
+        return -EACCES;
+    }
+
+    if (!cfg->enforce_blocks)
+        return 0;
 
     // Self-tamper protection (T1562 Impair Defenses): the security daemon itself
     // must not be killable by an unauthorized process — an attacker killing the
@@ -2113,6 +2460,39 @@ int BPF_PROG(ringzero_task_kill, struct task_struct *target, struct kernel_sigin
     }
 
     return 0; // observe-only: was -EACCES
+}
+
+// LSM: bpf — TAMPER PROTECTION for Ring Zero itself.
+//
+// Every way to detach a Ring Zero program or rewrite one of its maps goes
+// through the bpf() syscall. No agent process tree has a reason to make that
+// call, so with tamper protection on, an agent-tree process — root or not — is
+// refused it entirely. The daemon is not an agent and is unaffected, and so is
+// a human's root shell outside any agent.
+SEC("lsm/bpf")
+int BPF_PROG(ringzero_bpf_syscall, int cmd) {
+    struct config *cfg = get_config();
+    if (!cfg || !cfg->enabled || !cfg->tamper_protect)
+        return 0;
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    if (is_daemon_pid(pid))
+        return 0;
+    char comm[MAX_COMM_LEN] = {};
+    bpf_get_current_comm(comm, sizeof(comm));
+    if (!is_ai_agent(comm) && !bpf_map_lookup_elem(&agent_descendants, &pid))
+        return 0;
+    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (e) {
+        e->type = EVENT_PROCESS_EXEC;
+        e->blocked = 1;
+        fill_process_info(e);
+        __builtin_memset(e->path, 0, MAX_PATH_LEN);
+        const char m[] = "TAMPER:agent_bpf_refused";
+        __builtin_memcpy(e->path, m, sizeof(m));
+        e->remote_port = (u16)cmd;
+        bpf_ringbuf_submit(e, 0);
+    }
+    return -EACCES;
 }
 
 // LSM: sb_mount — block mount operations inside contained namespaces.

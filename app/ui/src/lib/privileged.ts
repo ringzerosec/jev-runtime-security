@@ -116,8 +116,8 @@ export function describeFailure(r: SequenceResult): { title: string; description
       };
     case 'unavailable':
       return {
-        title: 'Cannot change this from the app',
-        description: `${stopped.message}${progress} Run: ${stopped.command}`,
+        title: 'Password needed',
+        description: `${stopped.message}${progress}`,
       };
     default:
       return {

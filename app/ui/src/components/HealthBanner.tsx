@@ -71,13 +71,8 @@ export default function HealthBanner() {
     return (
       <Bar tone="critical">
         <ShieldAlert className="h-4 w-4 shrink-0" />
-        <span className="font-medium">Security daemon not reachable</span>
-        <span className="opacity-80">
-          — run{' '}
-          <code className="font-mono bg-red-100 px-1 rounded">
-            sudo systemctl start ringzero-daemon
-          </code>
-        </span>
+        <span className="font-medium">Ring Zero's protection service isn't running</span>
+        <span className="opacity-80">— restart it from the Overview, or restart this computer.</span>
         <span className="text-[10px] opacity-60 shrink-0">auto-retrying...</span>
         <RetryBtn onClick={poll} />
       </Bar>

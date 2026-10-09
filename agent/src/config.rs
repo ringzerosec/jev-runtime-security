@@ -53,6 +53,46 @@ pub struct DaemonConfig {
     pub stdio_capture: StdioCaptureSection,
     pub egress: EgressSection,
     pub transcript_watch: TranscriptWatchSection,
+    /// What each agent and MCP server may do (policy/capability.rs).
+    pub profiles: Vec<crate::policy::capability::ProfileConfig>,
+    /// Kernel controls on what agent process trees may run and change.
+    pub controls: ControlsSection,
+}
+
+// ── Kernel controls ─────────────────────────────────────────────────────────
+//
+// Each switch is a fixed list the kernel refuses to agent process trees. The
+// lists are not configurable here on purpose: a control is something a person
+// can switch on and understand, not a pattern language. They take effect only
+// when the daemon is enforcing ([daemon] mode = "enforce"), like file rules.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ControlsSection {
+    /// Agents may not run sudo, su, pkexec, doas or run0.
+    pub admin_tools: bool,
+    /// Agents may not hand work to systemd-run, at, batch or crontab, which
+    /// start it outside the agent's process tree and out of sight.
+    pub escape_tools: bool,
+    /// Agents may read, but not change, create, rename or delete, the files
+    /// that instruct agents (CLAUDE.md, AGENTS.md, .cursorrules and similar).
+    /// OFF by default: agents legitimately edit these when asked to.
+    pub instruction_files: bool,
+    /// Agents may not install or fetch packages (npm install, npx, pip
+    /// install, uv add, cargo install, ...). The kernel holds the package
+    /// manager; the daemon reads the command and refuses installs.
+    pub package_installs: bool,
+}
+
+impl Default for ControlsSection {
+    fn default() -> Self {
+        ControlsSection {
+            admin_tools: true,
+            escape_tools: true,
+            instruction_files: false,
+            package_installs: true,
+        }
+    }
 }
 
 // ── OSV.dev vulnerability lookups ───────────────────────────────────────────
@@ -113,6 +153,10 @@ pub struct DaemonSection {
     /// observe | enforce
     pub mode: String,
     pub socket_path: Option<String>,
+    /// Tamper protection (default on): the daemon cannot be killed except by
+    /// systemd or debugged, and agent process trees cannot use bpf(). Turn it
+    /// off for maintenance with `rz settings set tamper_protection off` (admin password).
+    pub tamper_protection: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +200,9 @@ pub struct DlpSection {
     pub key_routes: Vec<DlpKeyRouteEntry>,
     /// PII detection/redaction settings
     pub pii: PiiSection,
+    /// Secrets pasted into an agent prompt: off | warn | block. Checked on the
+    /// agent's UserPromptSubmit hook, locally; see secrets/prompt_guard.rs.
+    pub prompt_guard: crate::secrets::prompt_guard::PromptGuardMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,6 +245,8 @@ impl Default for DaemonConfig {
             stdio_capture: StdioCaptureSection::default(),
             egress: EgressSection::default(),
             transcript_watch: TranscriptWatchSection::default(),
+            profiles: Vec::new(),
+            controls: ControlsSection::default(),
         }
     }
 }
@@ -238,6 +287,7 @@ impl Default for DaemonSection {
             log_level: "info".into(),
             mode: "enforce".into(),
             socket_path: None,
+            tamper_protection: true,
         }
     }
 }
@@ -296,7 +346,112 @@ impl Default for DlpSection {
             enforce: true,
             key_routes: vec![],
             pii: PiiSection::default(),
+            prompt_guard: crate::secrets::prompt_guard::PromptGuardMode::default(),
         }
+    }
+}
+
+// ── Settings changed from the app ─────────────────────────────────────────────
+//
+// A few switches the Policy screen can flip (behind the administrator
+// password). They live in settings.json next to daemon.toml and override it,
+// so the operator's hand-written daemon.toml is never rewritten by the app.
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SettingsOverlay {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tamper_protection: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_guard: Option<crate::secrets::prompt_guard::PromptGuardMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escape_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_files: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_installs: Option<bool>,
+    /// Refuse to run files the write scan flagged ([scanner.write_scan] enforce).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quarantine: Option<bool>,
+}
+
+pub fn settings_path() -> PathBuf {
+    config_path().with_file_name("settings.json")
+}
+
+impl SettingsOverlay {
+    pub fn load() -> Self {
+        std::fs::read_to_string(settings_path())
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    /// Merge `update` into the stored overlay and write it atomically.
+    pub fn save_merged(update: &SettingsOverlay) -> Result<SettingsOverlay> {
+        let mut cur = Self::load();
+        if update.tamper_protection.is_some() {
+            cur.tamper_protection = update.tamper_protection;
+        }
+        if update.prompt_guard.is_some() {
+            cur.prompt_guard = update.prompt_guard;
+        }
+        if update.admin_tools.is_some() {
+            cur.admin_tools = update.admin_tools;
+        }
+        if update.escape_tools.is_some() {
+            cur.escape_tools = update.escape_tools;
+        }
+        if update.instruction_files.is_some() {
+            cur.instruction_files = update.instruction_files;
+        }
+        if update.package_installs.is_some() {
+            cur.package_installs = update.package_installs;
+        }
+        if update.quarantine.is_some() {
+            cur.quarantine = update.quarantine;
+        }
+        let path = settings_path();
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&cur)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(cur)
+    }
+
+    fn apply(&self, cfg: &mut DaemonConfig) {
+        if let Some(t) = self.tamper_protection {
+            cfg.daemon.tamper_protection = t;
+        }
+        if let Some(p) = self.prompt_guard {
+            cfg.dlp.prompt_guard = p;
+        }
+        if let Some(v) = self.admin_tools {
+            cfg.controls.admin_tools = v;
+        }
+        if let Some(v) = self.escape_tools {
+            cfg.controls.escape_tools = v;
+        }
+        if let Some(v) = self.instruction_files {
+            cfg.controls.instruction_files = v;
+        }
+        if let Some(v) = self.package_installs {
+            cfg.controls.package_installs = v;
+        }
+        if let Some(v) = self.quarantine {
+            cfg.scanner.write_scan.enforce = v;
+        }
+    }
+
+    /// True when the update changes nothing.
+    pub fn is_empty(&self) -> bool {
+        self.tamper_protection.is_none()
+            && self.prompt_guard.is_none()
+            && self.admin_tools.is_none()
+            && self.escape_tools.is_none()
+            && self.instruction_files.is_none()
+            && self.package_installs.is_none()
+            && self.quarantine.is_none()
     }
 }
 
@@ -307,9 +462,10 @@ impl DaemonConfig {
     pub fn load() -> Self {
         let path = config_path();
         match std::fs::read_to_string(&path) {
-            Ok(content) => match toml::from_str(&content) {
-                Ok(cfg) => {
-                    tracing::info!(path = %path.display(), "Config loaded");
+            Ok(content) => match toml::from_str::<DaemonConfig>(&content) {
+                Ok(mut cfg) => {
+                    tracing::debug!(path = %path.display(), "Config loaded");
+                    SettingsOverlay::load().apply(&mut cfg);
                     cfg
                 }
                 Err(e) => {
@@ -319,7 +475,9 @@ impl DaemonConfig {
             },
             Err(_) => {
                 tracing::info!(path = %path.display(), "Config not found — using defaults");
-                DaemonConfig::default()
+                let mut cfg = DaemonConfig::default();
+                SettingsOverlay::load().apply(&mut cfg);
+                cfg
             }
         }
     }
@@ -332,17 +490,20 @@ impl DaemonConfig {
         let path = config_path();
         match std::fs::read_to_string(&path) {
             Ok(content) => {
-                let cfg: DaemonConfig = toml::from_str(&content)
+                let mut cfg: DaemonConfig = toml::from_str(&content)
                     .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
                 cfg.webhooks
                     .validate()
                     .map_err(|e| anyhow::anyhow!("{}: [webhooks] {}", path.display(), e))?;
+                SettingsOverlay::load().apply(&mut cfg);
                 tracing::info!(path = %path.display(), "Config loaded");
                 Ok(cfg)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::info!(path = %path.display(), "Config not found — using defaults");
-                Ok(DaemonConfig::default())
+                let mut cfg = DaemonConfig::default();
+                SettingsOverlay::load().apply(&mut cfg);
+                Ok(cfg)
             }
             Err(e) => Err(anyhow::anyhow!("{}: {}", path.display(), e)),
         }

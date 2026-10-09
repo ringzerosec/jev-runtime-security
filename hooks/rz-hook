@@ -72,5 +72,15 @@ esac
 REASON=$(printf '%s' "$RESP" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')
 [ -z "$REASON" ] && REASON="Ring Zero policy: this tool call is out of policy for this agent."
 
+# A prompt is refused with a different shape than a tool call. For
+# UserPromptSubmit, Claude Code's documented contract is a top-level
+# {"decision":"block","reason":...}: the prompt is not sent to the model and the
+# reason is shown to the person, not to the model.
+case "$INPUT" in
+  *'"hook_event_name":"UserPromptSubmit"'*|*'"hook_event_name": "UserPromptSubmit"'*)
+    printf '{"decision":"block","reason":"%s"}\n' "$REASON"
+    exit 0 ;;
+esac
+
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$REASON"
 exit 0

@@ -9,7 +9,7 @@ Maintainer: Ring Zero Security <abhijit@ringzerosecurity.com>
 Homepage: https://ringzerosecurity.com
 Vcs-Git: https://github.com/ringzerosec/jev-runtime-security
 Vcs-Browser: https://github.com/ringzerosec/jev-runtime-security
-Description: Ring Zero Security — kernel-level runtime security for AI coding agents
+Description: Ring Zero Security — kernel-level runtime security for AI agents
  Ring Zero Security monitors and controls AI coding agent behavior at the OS
  level. See what your AI tools access, block what they shouldn't. Enforcement
  happens in the kernel via eBPF LSM hooks, underneath the agent process.

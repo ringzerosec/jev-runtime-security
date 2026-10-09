@@ -258,9 +258,15 @@ fn protected_from_rules(rules: &[serde_json::Value]) -> ProtectedPaths {
             continue;
         };
 
-        // Basenames come from EVERY block rule, exactly as the loader's first
-        // pass does — a `dir` rule that also yields basenames keeps them.
-        for name in crate::api::routes::pattern_to_basenames(pattern) {
+        // Basenames come from file rules only, exactly as the loader does: a
+        // `dir` rule's last component is a directory, not a name to protect
+        // everywhere.
+        let names = if crate::policy::file_rule::is_dir_rule(rule) {
+            crate::api::routes::dir_rule_basenames(pattern)
+        } else {
+            crate::api::routes::pattern_to_basenames(pattern)
+        };
+        for name in names {
             let name = name.to_lowercase();
             if !name.is_empty() && !p.basenames.contains(&name) {
                 p.basenames.push(name);
@@ -462,8 +468,9 @@ pub fn scan_protected_intent(content: &str, protected: &ProtectedPaths) -> Vec<C
 /// without a kernel, a filesystem or a model.
 ///
 /// `pattern_worst` is the worst severity a deterministic rule produced.
-/// `model_severity` is what the optional model layer said, if it ran.
-/// The enforce bit is a function of `pattern_worst` ALONE.
+/// `model_severity` is what the model layer (run off the hot path) said, if it
+/// ran. In v1 as shipped the enforce bit is a function of `pattern_worst`
+/// ALONE; a model may only make a verdict stricter.
 pub fn decide(
     pattern_worst: Option<Severity>,
     model_severity: Option<Severity>,
@@ -1472,6 +1479,28 @@ mod tests {
             !p.dirs.iter().any(|d| d.contains("allowed")),
             "an allow rule must not become a protected path"
         );
+    }
+
+    /// A directory rule protects that directory, not every file or folder that
+    /// shares its name. A rule for ~/rz-test/secrets once refused OpenClaw its
+    /// own dist/secrets folder.
+    #[test]
+    fn a_dir_rule_is_not_a_name_to_refuse_everywhere() {
+        let rules = serde_json::json!([
+            {"id":"1","pattern":"/home/u/rz-test/secrets","action":"block","source":"custom","kind":"dir"},
+            {"id":"2","pattern":"~/.ssh/*","action":"block","source":"custom","kind":"dir"},
+        ]);
+        let p = protected_from_rules(rules.as_array().unwrap());
+        assert!(
+            !p.basenames.iter().any(|b| b == "secrets"),
+            "got {:?}",
+            p.basenames
+        );
+        assert!(
+            p.basenames.iter().any(|b| b == "id_rsa"),
+            "known key names still count"
+        );
+        assert!(p.dirs.iter().any(|d| d.ends_with("/rz-test/secrets")));
     }
 
     /// A malformed or missing store yields nothing, never an error.

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { useStore } from '../store';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { cn } from '../lib/utils';
+import { threatCategoryLabel } from '../lib/threatCategories';
+import { describeRefusal, type RefusalEvent } from '../lib/refusals';
 import {
   ShieldCheck,
   Lock,
@@ -18,10 +19,7 @@ import {
   ArrowLeft,
   Shield,
   X,
-  Eye,
 } from 'lucide-react';
-import { useTokenScope } from '@/hooks/use-token-scope';
-import { toast } from './ui/toast';
 
 type Event = {
   id: string;
@@ -31,6 +29,8 @@ type Event = {
   allowed: boolean;
   reason?: string;
   timestamp: string;
+  category?: string;
+  classified_by?: string;
 };
 
 // Benign file patterns that should not appear as threats — these are normal
@@ -71,15 +71,35 @@ function isBenign(target: string): boolean {
   return BENIGN_PATTERNS.some((p) => p.test(target));
 }
 
-export default function Threats() {
-  const { readOnly: threatsReadOnly } = useTokenScope();
-  const { events } = useStore();
+const AGENT_LABELS: Record<string, string> = {
+  claude: 'Claude Code',
+  codex: 'Codex CLI',
+  gemini: 'Gemini CLI',
+  cursor: 'Cursor',
+  copilot: 'GitHub Copilot',
+  opencode: 'opencode',
+  windsurf: 'Windsurf',
+};
+function agentLabel(process?: string): string {
+  if (!process) return '';
+  const p = process.toLowerCase();
+  const hit = Object.keys(AGENT_LABELS).find((k) => p === k || p.startsWith(k));
+  return hit ? AGENT_LABELS[hit] : process;
+}
+
+export default function Threats({ onNavigate }: { onNavigate?: (page: 'policy') => void } = {}) {
+  const { refusals } = useStore();
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [resolvedIds, setResolvedIds] = useState<Set<string>>(new Set());
-  const [whitelistedPaths, setWhitelistedPaths] = useState<Set<string>>(new Set());
-  const [trustedProcesses, setTrustedProcesses] = useState<Set<string>>(new Set());
+  // Reviewed is a per-viewer note ("I've looked at this"), kept in this
+  // browser. Every item here was already refused; reviewing changes nothing.
+  const [resolvedIds, setResolvedIds] = useState<Set<string>>(() => {
+    try {
+      return new Set<string>(JSON.parse(localStorage.getItem('rz_reviewed_refusals') ?? '[]'));
+    } catch {
+      return new Set<string>();
+    }
+  });
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
-  const [showBenign, setShowBenign] = useState(false);
 
   const getSeverity = (event: Event) => {
     const kind = event.type?.toLowerCase() || '';
@@ -104,11 +124,9 @@ export default function Threats() {
     return 'low';
   };
 
-  const blocked = events.filter((e) => !e.allowed);
-  // Filter out LOW severity threats (benign runtime noise) unless user opts in
-  const realThreats = blocked.filter((e) => getSeverity(e) !== 'low');
-  const lowCount = blocked.length - realThreats.length;
-  const displayThreats = showBenign ? blocked : realThreats;
+  // Every refusal is listed. Severity orders and labels them; it never hides
+  // one: if the kernel refused it, the notice that pointed here must find it.
+  const displayThreats = refusals;
   const active = displayThreats.filter((e) => !resolvedIds.has(e.id));
   const resolved = displayThreats.filter((e) => resolvedIds.has(e.id));
 
@@ -134,6 +152,11 @@ export default function Threats() {
 
   const getDescription = (event: Event) => {
     const t = event.target?.toLowerCase() || '';
+    if (t.startsWith('pkg_install:')) return 'Package install refused';
+    if (t.endsWith(':prompt-secret')) return 'Secret blocked in a prompt';
+    if (t.startsWith('tamper:') || t.includes('tamper:')) return 'Tamper attempt refused';
+    if (/(^|\/)(api-token|daemon\.toml|profiles\.json|file-access-rules\.json|ringzero-daemon\.service)$/.test(t))
+      return "Agent refused Ring Zero's own files";
     if (t.includes('id_rsa') || t.includes('id_ed25519')) return 'SSH private key access attempt';
     if (t.includes('credentials')) return 'Cloud credentials access attempt';
     if (t.includes('.env')) return 'Environment secrets access attempt';
@@ -141,39 +164,38 @@ export default function Threats() {
     if (t.includes('shadow')) return 'Shadow password file access attempt';
     if (t.includes('token') || t.includes('secret')) return 'Secret/token access attempt';
     const kind = event.type?.toLowerCase() || '';
-    if (kind.includes('network')) return 'Outbound network connection flagged';
-    if (kind.includes('process')) return 'Suspicious process spawn detected';
-    return 'Suspicious file access detected';
+    if (kind.includes('process') && !event.allowed) {
+      if (event.category === 'privilege_escalation') return 'Agent refused an admin tool';
+      if (event.category === 'rogue_agent') return 'Agent refused work outside its own process';
+    }
+    if (kind.includes('file') && !event.allowed && event.category === 'memory_poisoning')
+      return "Agent refused a change to an agent's instructions";
+    // Everything listed here was refused; say so rather than "suspicious".
+    if (kind.includes('network')) return event.allowed ? 'Outbound network connection flagged' : 'Connection refused';
+    if (kind.includes('process')) return event.allowed ? 'Suspicious process spawn detected' : 'Program refused';
+    return event.allowed ? 'Suspicious file access detected' : 'File access refused';
+  };
+
+  // The line under a threat's title: who did it, and what it touched, in
+  // words rather than the raw event target.
+  const getSubject = (event: Event) => {
+    const who = agentLabel((event as { process?: string }).process ?? event.skill_name);
+    const t = event.target || '';
+    if (t.startsWith('PKG_INSTALL:')) return `${who} · ${t.slice('PKG_INSTALL:'.length)}`;
+    if (t.endsWith(':prompt-secret')) return `${who} · the secret was masked and the prompt not sent`;
+    if (t.startsWith('TAMPER:') || t.includes('TAMPER:')) return `${who} · ${t.replace(/^.*TAMPER:/, '').replace(/_/g, ' ')}`;
+    return who ? `${who} · ${t}` : t;
   };
 
   const markResolved = (id: string) => {
-    setResolvedIds(new Set([...resolvedIds, id]));
-    if (selectedEvent?.id === id) setSelectedEvent(null);
-  };
-
-  const whitelistPath = (event: Event) => {
-    const filename = event.target?.split('/').pop() || '';
-    // Unblocking a path is a policy change. With the read-only token the
-    // daemon would return 403, so say what to run instead of failing silently.
-    if (threatsReadOnly) {
-      toast({
-        variant: 'warning',
-        title: 'Needs root',
-        description: `Run: sudo rz file-access remove <id>  (path: ${filename})`,
-      });
-      return;
-    }
-    setWhitelistedPaths(new Set([...whitelistedPaths, filename]));
+    const next = new Set([...resolvedIds, id]);
+    setResolvedIds(next);
     try {
-      invoke('update_policy', { policy: { action: 'unblock_file', name: filename } });
-    } catch {}
-    markResolved(event.id);
-  };
-
-  const trustProcess = (event: Event) => {
-    const proc = event.skill_name || 'node';
-    setTrustedProcesses(new Set([...trustedProcesses, proc]));
-    markResolved(event.id);
+      localStorage.setItem('rz_reviewed_refusals', JSON.stringify([...next].slice(-1000)));
+    } catch {
+      /* per-viewer convenience only */
+    }
+    if (selectedEvent?.id === id) setSelectedEvent(null);
   };
 
   // --- Detail view ---
@@ -188,7 +210,7 @@ export default function Threats() {
           onClick={() => setSelectedEvent(null)}
           className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
         >
-          <ArrowLeft className="h-3 w-3" /> Back to Threats
+          <ArrowLeft className="h-3 w-3" /> Back to Security history
         </button>
 
         <div className="rounded-lg border bg-card p-5">
@@ -201,9 +223,20 @@ export default function Threats() {
           </div>
 
           <div className="grid grid-cols-2 gap-4 text-xs mb-4">
+            {e.category && (
+              <div className="col-span-2">
+                <p className="text-muted-foreground mb-0.5">Category</p>
+                <p className="text-foreground">
+                  {threatCategoryLabel(e.category)}
+                  <span className="text-muted-foreground">
+                    {' '}· labelled by {e.classified_by === 'rules' || !e.classified_by ? 'built-in rules' : e.classified_by}
+                  </span>
+                </p>
+              </div>
+            )}
             <div>
               <p className="text-muted-foreground mb-0.5">Target</p>
-              <code className="text-foreground font-mono text-[11px] break-all">{e.target}</code>
+              <code className="text-foreground font-mono text-[11px] break-all">{e.target?.replace(/^PKG_INSTALL:/, '')}</code>
             </div>
             <div>
               <p className="text-muted-foreground mb-0.5">Process</p>
@@ -226,7 +259,7 @@ export default function Threats() {
             <div>
               <p className="text-muted-foreground mb-0.5">Action Taken</p>
               <p className={cn('font-medium', e.allowed ? 'text-amber-500' : 'text-red-400')}>
-                {e.allowed ? 'Flagged — allowed by policy' : 'Blocked by security policy'}
+                {e.allowed ? 'Flagged — allowed by policy' : 'Refused before it happened'}
               </p>
             </div>
           </div>
@@ -243,7 +276,7 @@ export default function Threats() {
             <p>
               Process <code className="text-foreground">{e.skill_name || 'node'}</code>{' '}
               {e.allowed ? 'accessed' : 'attempted to access'}{' '}
-              <code className="text-foreground">{e.target}</code>.
+              <code className="text-foreground">{e.target?.replace(/^PKG_INSTALL:/, '')}</code>.
               {severity === 'critical' && ' This is a highly sensitive credential file.'}
               {severity === 'high' && ' This file may contain secrets or credentials.'}
               {severity === 'medium' && ' This operation was flagged by policy rules.'}
@@ -253,103 +286,44 @@ export default function Threats() {
           </div>
 
           <div className="flex flex-wrap gap-2 pt-3 border-t border-border/50">
-            <Button
-              size="sm"
-              variant="secondary"
-              className="h-7 text-xs"
-              onClick={() => whitelistPath(e)}
-            >
-              <ShieldCheck className="h-3 w-3 mr-1" />
-              Whitelist Path
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              className="h-7 text-xs"
-              onClick={() => trustProcess(e)}
-            >
-              <Shield className="h-3 w-3 mr-1" />
-              Trust Process
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              className="h-7 text-xs"
-              onClick={() => markResolved(e.id)}
-            >
-              <Check className="h-3 w-3 mr-1" />
-              Dismiss
-            </Button>
+            {describeRefusal(e as unknown as RefusalEvent).changeable && onNavigate && (
+              <Button size="sm" variant="secondary" className="h-7 text-xs" onClick={() => onNavigate('policy')}>
+                <Shield className="h-3 w-3 mr-1" />
+                Change rule
+              </Button>
+            )}
+            {!resolvedIds.has(e.id) && (
+              <Button size="sm" variant="secondary" className="h-7 text-xs" onClick={() => markResolved(e.id)}>
+                <Check className="h-3 w-3 mr-1" />
+                Mark reviewed
+              </Button>
+            )}
           </div>
         </div>
 
-        {/* Whitelisted / Trusted summary */}
-        {(whitelistedPaths.size > 0 || trustedProcesses.size > 0) && (
-          <div className="rounded-lg border bg-card p-4 text-xs">
-            {whitelistedPaths.size > 0 && (
-              <div className="mb-2">
-                <p className="text-muted-foreground mb-1">Whitelisted paths:</p>
-                <div className="flex flex-wrap gap-1">
-                  {[...whitelistedPaths].map((p) => (
-                    <Badge
-                      key={p}
-                      variant="outline"
-                      className="text-[10px] border-emerald-500/30 text-emerald-400"
-                    >
-                      {p}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            )}
-            {trustedProcesses.size > 0 && (
-              <div>
-                <p className="text-muted-foreground mb-1">Trusted processes:</p>
-                <div className="flex flex-wrap gap-1">
-                  {[...trustedProcesses].map((p) => (
-                    <Badge
-                      key={p}
-                      variant="outline"
-                      className="text-[10px] border-emerald-500/30 text-emerald-400"
-                    >
-                      {p}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
       </div>
     );
   }
 
   // --- List view ---
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 max-w-5xl">
       <div>
-        <h2 className="text-lg font-semibold tracking-tight">Threats</h2>
+        <h2 className="text-lg font-semibold tracking-tight">Security history</h2>
         <div className="flex items-center gap-3">
           <p className="text-xs text-muted-foreground">
-            {active.length} active · {resolved.length} resolved
+            {displayThreats.length === 0
+              ? 'Nothing refused in the last 24 hours'
+              : `${displayThreats.length} refused in the last 24 hours, before they happened · ${active.length} to review`}
           </p>
-          {lowCount > 0 && (
-            <button
-              onClick={() => setShowBenign(!showBenign)}
-              className="text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors flex items-center gap-1"
-            >
-              <Eye className="h-3 w-3" />
-              {showBenign ? 'Hide' : 'Show'} {lowCount} low severity
-            </button>
-          )}
         </div>
       </div>
 
       {active.length === 0 && resolved.length === 0 ? (
         <div className="text-center py-16">
           <ShieldCheck className="h-8 w-8 mx-auto mb-3 text-emerald-400 opacity-60" />
-          <p className="text-sm text-muted-foreground">No threats detected</p>
-          <p className="text-xs text-muted-foreground/60 mt-1">Security events will appear here</p>
+          <p className="text-sm text-muted-foreground">Nothing refused in the last 24 hours</p>
+          <p className="text-xs text-muted-foreground/60 mt-1">Whatever Ring Zero Security refuses appears here</p>
         </div>
       ) : null}
 
@@ -385,10 +359,15 @@ export default function Threats() {
                       >
                         {severity.toUpperCase()}
                       </Badge>
+                      {event.category && (
+                        <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground shrink-0">
+                          {threatCategoryLabel(event.category)}
+                        </span>
+                      )}
                     </div>
-                    <code className="text-[11px] text-muted-foreground truncate block">
-                      {event.target}
-                    </code>
+                    <div className="text-[11px] text-muted-foreground truncate">
+                      {getSubject(event)}
+                    </div>
                   </div>
                   <span className="text-[10px] text-muted-foreground/60 shrink-0">
                     {new Date(event.timestamp).toLocaleTimeString([], {
@@ -409,7 +388,7 @@ export default function Threats() {
       {resolved.length > 0 && (
         <div>
           <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
-            Resolved
+            Reviewed
           </h3>
           <div className="space-y-1">
             {resolved.map((event) => (
@@ -422,7 +401,7 @@ export default function Threats() {
                   {getDescription(event)}
                 </span>
                 <code className="text-[10px] text-muted-foreground/60 truncate max-w-48">
-                  {event.target}
+                  {event.target?.replace(/^PKG_INSTALL:/, '')}
                 </code>
               </div>
             ))}

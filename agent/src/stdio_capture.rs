@@ -245,6 +245,10 @@ async fn run(
         // enter/exit tracepoint machinery and the same tracked-pid set.
         ("trace_enter_recvfrom", "syscalls", "sys_enter_recvfrom"),
         ("trace_exit_recvfrom", "syscalls", "sys_exit_recvfrom"),
+        // The agent's whole tree, so a tool's own lookups are read too.
+        ("dns_tree_fork", "sched", "sched_process_fork"),
+        ("dns_tree_exit", "sched", "sched_process_exit"),
+        ("dns_tree_exec", "sched", "sched_process_exec"),
     ];
 
     let mut attached = 0u32;
@@ -286,7 +290,7 @@ async fn run(
         .take_map("dns_events")
         .and_then(|m| RingBuf::try_from(m).ok());
     if dns_ring.is_some() {
-        info!("DNS answer capture attached (source port 53, tracked agents only)");
+        info!("DNS answer capture attached (source port 53, agents and everything they start)");
     } else {
         warn!("dns_events ring buffer unavailable — hostname allowlisting will not learn");
     }
@@ -321,6 +325,11 @@ async fn run(
                 let end = 16 + len.min(data.len().saturating_sub(16));
                 if len == 0 || end <= 16 {
                     continue;
+                }
+                // Profiles learn approved names' addresses from the same answers.
+                let records = crate::dns_allow::parse_a_records(&data[16..end]);
+                if !records.is_empty() && crate::policy::capability::ENGINE.learn_dns(&records) {
+                    crate::policy::capability::sync_kernel().await;
                 }
                 if let Some(dns) = ctx.dns.as_ref() {
                     dns.lock().await.observe_response(&data[16..end]).await;

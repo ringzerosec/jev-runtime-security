@@ -401,7 +401,7 @@ const SKILL_FILES: &[(&str, &str, &str)] = &[
 
 /// All home directories to inspect. The daemon runs as root, so it can read
 /// every user's surface — `/root` plus each `/home/<user>`.
-fn home_dirs() -> Vec<(String, PathBuf)> {
+pub(crate) fn home_dirs() -> Vec<(String, PathBuf)> {
     let mut homes: Vec<(String, PathBuf)> = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/home") {
         for e in entries.flatten() {

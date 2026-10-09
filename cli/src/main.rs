@@ -574,6 +574,13 @@ async fn post_json(url: &str, body: serde_json::Value) -> Result<serde_json::Val
     parse_api_response(url, status, resp)
 }
 
+async fn put_json(url: &str, body: serde_json::Value) -> Result<serde_json::Value> {
+    let token = api_token(&api_base(url)).await?;
+    let body_str = body.to_string();
+    let (status, resp) = http_request("PUT", url, Some(&body_str), Some(&token)).await?;
+    parse_api_response(url, status, resp)
+}
+
 async fn delete_json(url: &str) -> Result<serde_json::Value> {
     let token = api_token(&api_base(url)).await?;
     let (status, resp) = http_request("DELETE", url, None, Some(&token)).await?;
@@ -680,6 +687,18 @@ enum Commands {
     FileAccess {
         #[command(subcommand)]
         action: FileAccessCommands,
+    },
+
+    /// Product-security switches: tamper protection, secrets in prompts
+    Settings {
+        #[command(subcommand)]
+        action: SettingsCommands,
+    },
+
+    /// What each agent and MCP server may do (network, programs, watch/enforce)
+    Profile {
+        #[command(subcommand)]
+        action: ProfileCommands,
     },
 
     /// Non-Human Identity inventory
@@ -877,6 +896,27 @@ enum EnforcementCommands {
     SetDefault { action: String },
     /// Set one category's action, e.g. `rz enforcement set-category credential_access block`
     SetCategory { category: String, action: String },
+}
+
+#[derive(Subcommand)]
+enum SettingsCommands {
+    /// rz settings set tamper_protection|admin_tools|escape_tools|instruction_files|package_installs|quarantine on|off
+    /// rz settings set prompt_guard off|warn|block
+    Set { key: String, value: String },
+}
+
+#[derive(Subcommand)]
+enum ProfileCommands {
+    /// List profiles with their allowed / would-block counts
+    Show,
+    /// Add or replace a profile from JSON, e.g.
+    /// rz profile set --json '{"name":"Claude Code","agent":"claude","allow_hosts":["10.0.0.0/24"],"network_mode":"enforce"}'
+    Set {
+        #[arg(long)]
+        json: String,
+    },
+    /// Remove a profile by name
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -2278,6 +2318,124 @@ fn operator_home() -> String {
 /// stored and then quietly do nothing fails here with the reason instead. A
 /// trailing `/*` means the directory and everything under it; `--dir` and
 /// `--file` say it outright.
+async fn cmd_settings_set(api: &str, key: &str, value: &str) -> Result<()> {
+    let body = match (key, value) {
+        ("tamper_protection", "on") => serde_json::json!({"tamper_protection": true}),
+        ("tamper_protection", "off") => serde_json::json!({"tamper_protection": false}),
+        ("prompt_guard", v @ ("off" | "warn" | "block")) => serde_json::json!({"prompt_guard": v}),
+        (k @ ("admin_tools" | "escape_tools" | "instruction_files" | "package_installs" | "quarantine"), v @ ("on" | "off")) => {
+            serde_json::json!({ (k): v == "on" })
+        }
+        _ => anyhow::bail!(
+            "use: tamper_protection|admin_tools|escape_tools|instruction_files|package_installs|quarantine on|off, \
+             or prompt_guard off|warn|block"
+        ),
+    };
+    let v = put_json(&format!("{api}/api/v1/policy/settings"), body).await?;
+    if v["ok"].as_bool() == Some(true) {
+        println!("Saved and applied: {key} = {value}");
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "{}",
+            v["error"]
+                .as_str()
+                .unwrap_or("the daemon refused the change")
+        )
+    }
+}
+
+async fn cmd_profile_show(api: &str) -> Result<()> {
+    let v = fetch_json(&format!("{api}/api/v1/policy/profiles")).await?;
+    let empty = vec![];
+    let list = v["profiles"].as_array().unwrap_or(&empty);
+    if list.is_empty() {
+        println!("No profiles. Add one with: sudo rz profile set --json '{{...}}'");
+        return Ok(());
+    }
+    for p in list {
+        let hosts: Vec<String> = p["allow_hosts"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        println!(
+            "{}  ({})\n  network [{}]: {}\n  programs [{}]: {}\n  allowed {}  would block {}",
+            p["name"].as_str().unwrap_or("?"),
+            p["kind"].as_str().unwrap_or("?"),
+            p["network_mode"].as_str().unwrap_or("watch"),
+            if hosts.is_empty() {
+                "none".to_string()
+            } else {
+                hosts.join(", ")
+            },
+            p["programs_mode"].as_str().unwrap_or("watch"),
+            if p["allow_spawn"].as_bool() == Some(false) {
+                "may not start programs".to_string()
+            } else {
+                let progs: Vec<String> = p["allow_programs"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|h| h.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if progs.is_empty() {
+                    "any".to_string()
+                } else {
+                    progs.join(", ")
+                }
+            },
+            p["stats"]["allowed"].as_u64().unwrap_or(0),
+            p["stats"]["would_block"].as_u64().unwrap_or(0),
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_profile_set(api: &str, json: &str) -> Result<()> {
+    let body: serde_json::Value = serde_json::from_str(json).context("--json is not valid JSON")?;
+    if !body.is_object() {
+        anyhow::bail!("--json must be one profile object");
+    }
+    let v = put_json(&format!("{api}/api/v1/policy/profiles"), body).await?;
+    if v["ok"].as_bool() == Some(true) {
+        println!("Profile saved and applied.");
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "{}",
+            v["error"]
+                .as_str()
+                .unwrap_or("the daemon refused the profile")
+        )
+    }
+}
+
+async fn cmd_profile_remove(api: &str, name: &str) -> Result<()> {
+    let enc: String = name
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    let v = delete_json(&format!("{api}/api/v1/policy/profiles/{enc}")).await?;
+    if v["ok"].as_bool() == Some(true) {
+        println!("Profile removed.");
+        Ok(())
+    } else {
+        anyhow::bail!("{}", v["error"].as_str().unwrap_or("the daemon refused"))
+    }
+}
+
 async fn cmd_file_access_add(
     api: &str,
     pattern: &str,
@@ -3196,6 +3354,16 @@ async fn main() -> Result<()> {
                 cmd_file_access_add(&api, &pattern, &a, description.as_deref(), kind).await
             }
             FileAccessCommands::Remove { id, all } => cmd_file_access_remove(&api, &id, all).await,
+        },
+
+        Commands::Settings { action } => match action {
+            SettingsCommands::Set { key, value } => cmd_settings_set(&api, &key, &value).await,
+        },
+
+        Commands::Profile { action } => match action {
+            ProfileCommands::Show => cmd_profile_show(&api).await,
+            ProfileCommands::Set { json } => cmd_profile_set(&api, &json).await,
+            ProfileCommands::Remove { name } => cmd_profile_remove(&api, &name).await,
         },
 
         Commands::Nhi => cmd_nhi(&api).await,
