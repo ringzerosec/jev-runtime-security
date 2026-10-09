@@ -356,7 +356,10 @@ pub(crate) fn agent_display_name(comm: &str, parent_comm: &[u8]) -> String {
 fn kernel_event_to_driver_msg(e: &KernelEvent) -> DriverMessage {
     let raw_comm = cstr(&e.comm);
     let comm = agent_display_name(&raw_comm, &e.parent_comm);
-    let path = cstr(&e.path);
+    // A refused file open carries the file's full path in `args` (the kernel
+    // fills it only on refusals). Use it, so the record says WHICH file.
+    let full = if e.event_type == 1 && e.blocked == 1 { cstr(&e.args) } else { String::new() };
+    let path = if full.starts_with('/') { full } else { cstr(&e.path) };
 
     // Extract args for exec events (event_type 10)
     let args = if e.event_type == 10 {
@@ -410,6 +413,139 @@ fn kernel_event_to_driver_msg(e: &KernelEvent) -> DriverMessage {
             args,
         }
     }
+}
+
+/// Whether the package-installs control is on. The kernel holds package
+/// managers only when it is; the interpreter check below reads this.
+static PACKAGE_GUARD_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tell the process that was refused why, on its own stderr, so the agent that
+/// ran it can read the reason and pass it on. Best effort.
+///
+/// The daemon has no CAP_DAC_OVERRIDE (on purpose), so it cannot open another
+/// user's pipe through /proc/<pid>/fd/2. It borrows the already-open
+/// descriptor with pidfd_getfd instead, which needs only CAP_SYS_PTRACE.
+fn tell_refused(pid: u32, command: &str) {
+    let msg = format!(
+        "\nRing Zero Security refused `{command}`: agents can't install packages on this machine. \
+         Ask the person you are working for to install it.\n"
+    );
+    unsafe {
+        let pidfd = libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) as i32;
+        if pidfd < 0 {
+            return;
+        }
+        let fd = libc::syscall(libc::SYS_pidfd_getfd, pidfd, 2, 0) as i32;
+        if fd >= 0 {
+            let _ = libc::write(fd, msg.as_ptr() as *const libc::c_void, msg.len());
+            libc::close(fd);
+        }
+        libc::close(pidfd);
+    }
+}
+
+/// The agent a process belongs to: the nearest ancestor that is an agent by
+/// name, as its display name. Read before the process is killed, while the
+/// chain is still there to walk.
+fn owning_agent(mut pid: u32) -> Option<String> {
+    for _ in 0..16 {
+        if pid <= 1 {
+            return None;
+        }
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        let comm = comm.trim();
+        if crate::common::agent_detect::is_ai_agent(comm) {
+            return Some(agent_display_name(comm, &[0u8; MAX_COMM_LEN]));
+        }
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // Field 4, after the ")" that closes comm (which may contain spaces).
+        let after = &stat[stat.rfind(')')? + 1..];
+        pid = after.split_whitespace().nth(1)?.parse().ok()?;
+    }
+    None
+}
+
+/// Refuse an install: say why, then kill it. A stopped process dies on SIGKILL.
+fn refuse_install(pid: u32, command: &str) {
+    tell_refused(pid, command);
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+}
+
+/// A package manager in an agent's tree, stopped by the kernel (event 13).
+/// Decide here, on the reader's own thread: a stopped process must never wait
+/// on a full channel. Installs are killed and reported as a refused exec; any
+/// other command is resumed and reports nothing new (its exec was already seen).
+fn decide_package_hold(e: &KernelEvent) -> Option<DriverMessage> {
+    use crate::policy::package_guard::{argv_of, install_command, TARGET_PREFIX};
+    let pid = e.pid;
+    let argv = argv_of(pid).unwrap_or_default();
+    match install_command(&argv) {
+        Some(install) => {
+            let agent = owning_agent(e.ppid);
+            refuse_install(pid, &install.command);
+            tracing::warn!(pid, command = %install.command, agent = ?agent, "Refused a package install by an agent");
+            Some(DriverMessage::Event {
+                event_type: 10,
+                pid,
+                uid: e.uid,
+                comm: agent.unwrap_or_else(|| agent_display_name(&cstr(&e.comm), &e.parent_comm)),
+                path: Some(format!("{TARGET_PREFIX}{}", install.command)),
+                remote_ip: None,
+                remote_port: None,
+                blocked: 1,
+                args: Some(argv.join(" ")),
+            })
+        }
+        None => {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGCONT);
+            }
+            None
+        }
+    }
+}
+
+/// `python3 -m pip install x` runs as python, not pip, so the kernel does not
+/// hold it. Check agent-tree interpreter execs a moment after they start and
+/// refuse installs then. Slower than the hold, so it is the backstop.
+fn check_interpreter_install(e: &KernelEvent, tx: tokio::sync::mpsc::Sender<DriverMessage>) {
+    if e.event_type != 10 || !PACKAGE_GUARD_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let path = cstr(&e.path);
+    let base = path.rsplit('/').next().unwrap_or("");
+    if !(base.starts_with("python") || base == "node" || base == "env") {
+        return;
+    }
+    let (pid, uid) = (e.pid, e.uid);
+    let comm = agent_display_name(&cstr(&e.comm), &e.parent_comm);
+    std::thread::spawn(move || {
+        use crate::policy::package_guard::{argv_of, install_command, TARGET_PREFIX};
+        // The event is raised before the exec completes; give it a moment.
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(10));
+            let Some(argv) = argv_of(pid) else { return };
+            if let Some(install) = install_command(&argv) {
+                let agent = owning_agent(pid);
+                refuse_install(pid, &install.command);
+                tracing::warn!(pid, command = %install.command, "Refused a package install by an agent (interpreter)");
+                let _ = tx.try_send(DriverMessage::Event {
+                    event_type: 10,
+                    pid,
+                    uid,
+                    comm: agent.unwrap_or(comm),
+                    path: Some(format!("{TARGET_PREFIX}{}", install.command)),
+                    remote_ip: None,
+                    remote_port: None,
+                    blocked: 1,
+                    args: Some(argv.join(" ")),
+                });
+                return;
+            }
+        }
+    });
 }
 
 fn send_event_to_driver_msg(se: &SendEvent) -> DriverMessage {
@@ -685,6 +821,11 @@ pub const INSTRUCTION_FILES: &[&str] = &[
     "copilot-instructions.md",
 ];
 
+/// Package managers the package-installs control holds for a decision.
+pub const PACKAGE_MANAGERS: &[&str] = &[
+    "npm", "npx", "pnpm", "yarn", "bun", "bunx", "pip", "pip3", "pipx", "uv", "uvx", "poetry", "cargo", "gem",
+];
+
 fn comm_key(name: &str) -> [u8; MAX_COMM_LEN] {
     let mut key = [0u8; MAX_COMM_LEN];
     let b = name.as_bytes();
@@ -722,10 +863,19 @@ fn apply_controls(bpf: &mut Bpf, c: &crate::config::ControlsSection) {
             }
         }
     }
+    // Like every control, it refuses only while the daemon is enforcing.
+    let enforcing = crate::config::DaemonConfig::load().daemon.mode == "enforce";
+    PACKAGE_GUARD_ON.store(c.package_installs && enforcing, std::sync::atomic::Ordering::Relaxed);
+    if let Some(m) = bpf.map_mut("pkg_guard") {
+        if let Ok(mut arr) = Array::<_, u8>::try_from(m) {
+            let _ = arr.set(0, c.package_installs as u8, 0);
+        }
+    }
     info!(
         admin_tools = c.admin_tools,
         escape_tools = c.escape_tools,
         instruction_files = c.instruction_files,
+        package_installs = c.package_installs,
         "Kernel controls applied to agent process trees"
     );
 }
@@ -859,11 +1009,17 @@ fn load_file_access_rules(bpf: &mut Bpf) {
         if rule["action"].as_str() != Some("block") {
             continue;
         }
+        // Directory rules go to the directory map. Their last component is not
+        // a file name to refuse everywhere.
         let pattern = match rule["pattern"].as_str() {
             Some(p) => p,
             None => continue,
         };
-        let basenames = crate::api::routes::pattern_to_basenames(pattern);
+        let basenames = if crate::policy::file_rule::is_dir_rule(rule) {
+            crate::api::routes::dir_rule_basenames(pattern)
+        } else {
+            crate::api::routes::pattern_to_basenames(pattern)
+        };
         for name in &basenames {
             let _ = map.insert(make_file_key(name), 1u8, 0);
             count += 1;
@@ -1611,6 +1767,7 @@ pub async fn start(
     for (name, category, tracepoint) in &[
         ("handle_fork", "sched", "sched_process_fork"),
         ("handle_exit", "sched", "sched_process_exit"),
+        ("handle_exec_pkg", "sched", "sched_process_exec"),
     ] {
         let Some(prog) = bpf.program_mut(name) else {
             warn!("Tracepoint program not found: {}", name);
@@ -1965,6 +2122,13 @@ pub async fn start(
                     let data: &[u8] = item.as_ref();
                     if data.len() >= std::mem::size_of::<KernelEvent>() {
                         let e = unsafe { &*(data.as_ptr() as *const KernelEvent) };
+                        if e.event_type == 13 {
+                            if let Some(msg) = decide_package_hold(e) {
+                                let _ = tx.try_send(msg);
+                            }
+                            continue;
+                        }
+                        check_interpreter_install(e, tx.clone());
                         let msg = kernel_event_to_driver_msg(e);
                         event_count += 1;
                         if event_count <= 5 || event_count % 100_000 == 0 {

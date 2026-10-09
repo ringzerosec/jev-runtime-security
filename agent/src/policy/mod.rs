@@ -7,5 +7,6 @@ pub mod capability;
 pub mod file_rule;
 pub mod intent_policy;
 pub mod network;
+pub mod package_guard;
 pub mod profile;
 pub mod user_rules;

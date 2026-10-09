@@ -31,6 +31,7 @@ enum event_type {
     EVENT_PROCESS_EXEC = 10,
     EVENT_PROCESS_FORK = 11,
     EVENT_PROCESS_EXIT = 12,
+    EVENT_PKG_HOLD = 13,      // an agent's package manager, stopped for a decision
     EVENT_NETWORK_CONNECT = 20,
     EVENT_NETWORK_SEND = 30,
     EVENT_MPROTECT_WX = 25,
@@ -1028,6 +1029,16 @@ static __always_inline void dlp_taint_current(void) {
     bpf_map_update_elem(&tainted_pids, &pid, &ti, BPF_ANY);
 }
 
+// A refused open records the file's FULL path, in e->args (unused for file
+// events), so the record can say which "secrets" or ".env" it was. Only
+// refusals pay for this; e->path keeps the name the rules matched.
+static __always_inline void record_refused_path(struct event *e, struct file *file) {
+    __builtin_memset(e->args, 0, MAX_ARGS_LEN);
+    long n = bpf_d_path(&file->f_path, e->args, MAX_ARGS_LEN);
+    if (n < 0)
+        e->args[0] = '\0';
+}
+
 SEC("lsm/file_open")
 int BPF_PROG(ringzero_file_open, struct file *file) {
     struct config *cfg = get_config();
@@ -1141,6 +1152,7 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
         unsigned int ro_mode = BPF_CORE_READ(file, f_mode);
         if ((ro_mode & RZ_FMODE_WRITE) && bpf_map_lookup_elem(&agent_readonly_names, e->path)) {
             e->blocked = 1;
+            record_refused_path(e, file);
             bpf_ringbuf_submit(e, 0);
             return -EACCES;
         }
@@ -1171,6 +1183,7 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
         u8 one = 1;
         bpf_map_update_elem(&file_open_block_dedup, &caller_pid, &one, BPF_ANY);
         e->blocked = 1;
+            record_refused_path(e, file);
         bpf_ringbuf_submit(e, 0);
         return -EACCES;
     }
@@ -1192,6 +1205,7 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
             struct write_verdict *v = bpf_map_lookup_elem(&agent_write_verdicts, &qk);
             if (v && v->enforce && cfg->quarantine_enforce) {
                 e->blocked = 1;
+            record_refused_path(e, file);
                 bpf_ringbuf_submit(e, 0);
                 return -EACCES;
             }
@@ -1243,6 +1257,7 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
             }
             if (!in_allowed) {
                 e->blocked = 1;
+            record_refused_path(e, file);
                 bpf_ringbuf_submit(e, 0);
                 return -EACCES;
             }
@@ -1262,6 +1277,7 @@ int BPF_PROG(ringzero_file_open, struct file *file) {
             int in_blocked = dentry_under_blocked_dir(dentry);
             if (in_blocked) {
                 e->blocked = 1;
+            record_refused_path(e, file);
                 bpf_ringbuf_submit(e, 0);
                 return -EACCES;
             }
@@ -1743,11 +1759,66 @@ int handle_fork(struct trace_event_raw_sched_process_fork *ctx) {
     return 0;
 }
 
+// ── Package installs by agents ──────────────────────────────────────────────
+// [0] = 1 when the "agents can't install packages" control is on.
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u8);
+} pkg_guard SEC(".maps");
+
+// A process in an agent's tree has just become a package manager. Stop it
+// before it runs a single instruction and ask the daemon. The kernel cannot
+// cheaply tell `npm test` from `npm install`; the daemon reads the whole
+// command line, resumes it when it does not add or fetch packages, and kills
+// it when it does. While it waits it can do nothing.
+//
+// At this tracepoint the new image is in place, so comm is the program that
+// was run ("npm", "pip3"), even when a shebang hands it to an interpreter.
+SEC("tp/sched/sched_process_exec")
+int handle_exec_pkg(void *ctx) {
+    struct config *cfg = get_config();
+    if (!cfg || !cfg->enabled || !cfg->enforce_blocks)
+        return 0;
+    u32 zero = 0;
+    u8 *on = bpf_map_lookup_elem(&pkg_guard, &zero);
+    if (!on || !*on)
+        return 0;
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    if (!bpf_map_lookup_elem(&agent_descendants, &pid))
+        return 0;
+    char comm[MAX_COMM_LEN] = {};
+    bpf_get_current_comm(comm, sizeof(comm));
+    if (!is_package_manager(comm))
+        return 0;
+    // No room to ask means nobody would ever resume it: let it run instead of
+    // leaving it stopped forever. The daemon still sees the exec.
+    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_drop_counter(0);
+        return 0;
+    }
+    bpf_send_signal(19); // SIGSTOP
+    e->type = EVENT_PKG_HOLD;
+    e->blocked = 0;
+    fill_process_info(e);
+    __builtin_memset(e->path, 0, MAX_PATH_LEN);
+    __builtin_memset(e->args, 0, MAX_ARGS_LEN);
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
 SEC("tp/sched/sched_process_exit")
 int handle_exit(void *ctx) {
     // Drop the taint when the process exits (LRU also bounds the map, so a missed
     // exit can't leak). Pure bookkeeping, no event.
-    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    // This tracepoint fires for every THREAD that exits. Only the thread-group
+    // leader's exit ends the process; a worker thread exiting must not untag it.
+    u64 id = bpf_get_current_pid_tgid();
+    u32 pid = id >> 32;
+    if ((u32)id != pid)
+        return 0;
     bpf_map_delete_elem(&agent_descendants, &pid);
     bpf_map_delete_elem(&tainted_pids, &pid); // drop DLP taint too (HASH, not LRU)
     return 0;

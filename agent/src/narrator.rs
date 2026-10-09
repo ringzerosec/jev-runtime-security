@@ -347,6 +347,12 @@ impl Narrator {
         let name = base_name(&ev.target);
         let lower = name.to_ascii_lowercase();
 
+        if let Some(cmd) = ev.target.strip_prefix(crate::policy::package_guard::TARGET_PREFIX) {
+            self.flush_reads(st);
+            self.push(st, Level::Alert, agent, "blocked", format!("{agent} tried to install packages with {cmd}. Ring Zero Security refused: agents can't install packages."));
+            return;
+        }
+
         if ev.target.starts_with("TAMPER:") {
             self.flush_reads(st);
             self.push(st, Level::Alert, "Ring Zero Security", "blocked", "Something tried to stop or inspect Ring Zero Security itself. Refused.".into());
@@ -676,6 +682,19 @@ mod tests {
         let n = fresh();
         n.observe(&ev(EventKind::FileOpen, "Claude Code", "id_rsa", false));
         assert_eq!(texts(&n), vec![(Level::Alert, "Claude Code just tried to read your SSH key. Blocked by Ring Zero Security.".into())]);
+    }
+
+    #[test]
+    fn refused_package_install_names_the_command() {
+        let n = fresh();
+        n.observe(&ev(EventKind::ProcessExec, "Claude Code", "PKG_INSTALL:npm install left-pad", false));
+        assert_eq!(
+            texts(&n),
+            vec![(
+                Level::Alert,
+                "Claude Code tried to install packages with npm install left-pad. Ring Zero Security refused: agents can't install packages.".into()
+            )]
+        );
     }
 
     #[test]

@@ -146,7 +146,8 @@ pub fn validate(args: &[String]) -> Result<(), String> {
         [
             "settings",
             "set",
-            "tamper_protection" | "admin_tools" | "escape_tools" | "instruction_files" | "quarantine",
+            "tamper_protection" | "admin_tools" | "escape_tools" | "instruction_files" | "package_installs"
+            | "quarantine",
             "on" | "off",
         ] => Ok(()),
         ["settings", "set", "prompt_guard", "off" | "warn" | "block"] => Ok(()),
@@ -326,6 +327,7 @@ mod tests {
         assert!(v(&["settings", "set", "tamper_protection", "maybe"]).is_err());
         assert!(v(&["settings", "set", "admin_tools", "off"]).is_ok());
         assert!(v(&["settings", "set", "instruction_files", "on"]).is_ok());
+        assert!(v(&["settings", "set", "package_installs", "off"]).is_ok());
         assert!(v(&["settings", "set", "quarantine", "on"]).is_ok());
         assert!(v(&["settings", "set", "admin_tools", "sudo"]).is_err());
         assert!(v(&["sessions", "terminate", "auto-opencode-8795"]).is_ok());

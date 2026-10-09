@@ -78,11 +78,15 @@ pub struct ControlsSection {
     /// that instruct agents (CLAUDE.md, AGENTS.md, .cursorrules and similar).
     /// OFF by default: agents legitimately edit these when asked to.
     pub instruction_files: bool,
+    /// Agents may not install or fetch packages (npm install, npx, pip
+    /// install, uv add, cargo install, ...). The kernel holds the package
+    /// manager; the daemon reads the command and refuses installs.
+    pub package_installs: bool,
 }
 
 impl Default for ControlsSection {
     fn default() -> Self {
-        ControlsSection { admin_tools: true, escape_tools: true, instruction_files: false }
+        ControlsSection { admin_tools: true, escape_tools: true, instruction_files: false, package_installs: true }
     }
 }
 
@@ -360,6 +364,8 @@ pub struct SettingsOverlay {
     pub escape_tools: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_files: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_installs: Option<bool>,
     /// Refuse to run files the write scan flagged ([scanner.write_scan] enforce).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quarantine: Option<bool>,
@@ -395,6 +401,9 @@ impl SettingsOverlay {
         if update.instruction_files.is_some() {
             cur.instruction_files = update.instruction_files;
         }
+        if update.package_installs.is_some() {
+            cur.package_installs = update.package_installs;
+        }
         if update.quarantine.is_some() {
             cur.quarantine = update.quarantine;
         }
@@ -421,6 +430,9 @@ impl SettingsOverlay {
         if let Some(v) = self.instruction_files {
             cfg.controls.instruction_files = v;
         }
+        if let Some(v) = self.package_installs {
+            cfg.controls.package_installs = v;
+        }
         if let Some(v) = self.quarantine {
             cfg.scanner.write_scan.enforce = v;
         }
@@ -433,6 +445,7 @@ impl SettingsOverlay {
             && self.admin_tools.is_none()
             && self.escape_tools.is_none()
             && self.instruction_files.is_none()
+            && self.package_installs.is_none()
             && self.quarantine.is_none()
     }
 }

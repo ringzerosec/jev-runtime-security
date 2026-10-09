@@ -327,6 +327,10 @@ pub struct EventsQuery {
     pub limit: usize,
     /// Optional comma-separated event kind filter (e.g. "llm_request,llm_response,llm_tool_call")
     pub kind: Option<String>,
+    /// Only refusals. Searched over the whole 24-hour window, not just the
+    /// latest `limit` events, so a refusal is never crowded out by noise.
+    #[serde(default)]
+    pub blocked: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -511,12 +515,30 @@ async fn get_events(
     Query(p): Query<EventsQuery>,
 ) -> impl IntoResponse {
     // Fetch more than limit when filtering, to ensure enough results after filtering
-    let fetch_limit = if p.kind.is_some() {
+    let fetch_limit = if p.blocked {
+        usize::MAX
+    } else if p.kind.is_some() {
         p.limit.min(1000) * 10
     } else {
         p.limit.min(1000)
     };
     match state.timeline.all_recent(86400, fetch_limit) {
+        Ok(events) if p.blocked => {
+            let refused: Vec<serde_json::Value> = events
+                .iter()
+                .filter(|e| !e.allowed)
+                .take(p.limit.min(1000))
+                .map(|e| {
+                    let mut v = serde_json::to_value(e).unwrap_or_default();
+                    if let (Some(obj), Some(cat)) = (v.as_object_mut(), crate::enforcement::classify(e)) {
+                        obj.insert("category".into(), serde_json::json!(cat));
+                        obj.insert("classified_by".into(), serde_json::json!("rules"));
+                    }
+                    v
+                })
+                .collect();
+            Json(serde_json::json!(refused)).into_response()
+        }
         Ok(events) => {
             // Filter noise targets (cgroup, proc, .so files) from file_open events
             let events: Vec<_> = events
@@ -2222,7 +2244,7 @@ async fn policy_profile_upsert(
 /// PUT /api/v1/policy/settings — flip a product-security switch.
 /// Body: any of {"tamper_protection": bool, "prompt_guard": "off|warn|block",
 /// "admin_tools": bool, "escape_tools": bool, "instruction_files": bool,
-/// "quarantine": bool}.
+/// "package_installs": bool, "quarantine": bool}.
 /// Full-scope token only, and refused from agent callers by the auth layer;
 /// the app reaches this through `rz settings set` under polkit, so the
 /// administrator password is asked every time. Saved to settings.json and
@@ -2245,7 +2267,11 @@ async fn policy_settings_set(
             if let Some(pg) = update.prompt_guard {
                 tracing::info!(?pg, "Prompt guard changed by an administrator");
             }
-            if update.admin_tools.is_some() || update.escape_tools.is_some() || update.instruction_files.is_some() {
+            if update.admin_tools.is_some()
+                || update.escape_tools.is_some()
+                || update.instruction_files.is_some()
+                || update.package_installs.is_some()
+            {
                 let controls = crate::config::DaemonConfig::load().controls;
                 if let Some(tx) = crate::ebpf_loader::CMD_TX.get() {
                     let _ = tx.send(crate::ebpf_loader::EbpfCommand::SetControls(controls.clone())).await;
@@ -2297,12 +2323,14 @@ async fn policy_profiles(State(_state): State<ApiState>) -> impl IntoResponse {
             "admin_tools": cfg.controls.admin_tools,
             "escape_tools": cfg.controls.escape_tools,
             "instruction_files": cfg.controls.instruction_files,
+            "package_installs": cfg.controls.package_installs,
             "quarantine": cfg.scanner.write_scan.enforce,
             "write_scan": cfg.scanner.write_scan.enabled,
             "lists": {
                 "admin_tools": crate::ebpf_loader::ADMIN_TOOLS,
                 "escape_tools": crate::ebpf_loader::ESCAPE_TOOLS,
                 "instruction_files": crate::ebpf_loader::INSTRUCTION_FILES,
+                "package_installs": crate::ebpf_loader::PACKAGE_MANAGERS,
             },
         },
         "profiles": crate::policy::capability::ENGINE.report(),
@@ -3271,6 +3299,23 @@ async fn update_file_access_rules(
     if let Some(ref ebpf_fn) = state.ebpf_block_file {
         let mut blocked_count = 0usize;
         for rule in &rules {
+            // A directory rule is enforced by the directory map below. Its
+            // last component is not a file name to refuse everywhere: a rule
+            // for ~/rz-test/secrets must not refuse every "secrets" on disk.
+            let mut legacy = false;
+            let is_dir = crate::policy::file_rule::infer_kind(
+                &rule.pattern,
+                rule.kind.as_deref(),
+                rule.description.as_deref(),
+                &mut legacy,
+            ) == crate::policy::file_rule::Kind::Dir;
+            if is_dir && rule.action == "block" {
+                for basename in dir_rule_basenames(&rule.pattern) {
+                    ebpf_fn(basename, true);
+                    blocked_count += 1;
+                }
+                continue;
+            }
             if rule.action == "block" && !rule.pattern.is_empty() {
                 // A concrete absolute path (no glob) is pushed as-is: the eBPF
                 // side then pins the file's (dev, ino) identity as well as its
@@ -3374,6 +3419,17 @@ fn expand_rule_tilde(path: &str) -> String {
 }
 
 pub fn pattern_to_basenames(pattern: &str) -> Vec<String> {
+    expand_basenames(pattern, true)
+}
+
+/// Basenames a DIRECTORY rule stands for: only the known credential stores
+/// (~/.ssh/*, ~/.aws/*). Never the directory's own name — a rule for
+/// ~/rz-test/secrets must not refuse every file or folder called "secrets".
+pub fn dir_rule_basenames(pattern: &str) -> Vec<String> {
+    expand_basenames(pattern, false)
+}
+
+fn expand_basenames(pattern: &str, generic: bool) -> Vec<String> {
     let mut names = Vec::new();
     let pat = pattern.trim();
 
@@ -3434,6 +3490,10 @@ pub fn pattern_to_basenames(pattern: &str) -> Vec<String> {
     if pat.starts_with("*.") {
         // Can't do extension matching in eBPF basename map — skip silently.
         // These are still caught by userspace policy.
+        return names;
+    }
+
+    if !generic {
         return names;
     }
 

@@ -8,7 +8,49 @@
 #define MAX_COMM_LEN 16
 #endif
 
+// End of the first word of a comm: NUL or space.
+#define RZ_WORD_END(c, i) ((c)[i] == '\0' || (c)[i] == ' ')
+
+// Package managers. They are never an agent by their own name: npm sets its
+// process name to its command line ("npm i openclaw@"), so the package being
+// installed would otherwise make npm look like the agent it installs. A package
+// manager an agent starts is still part of that agent's tree (inherited at fork).
+static __always_inline int is_package_manager(const char *c) {
+    // npm, npx
+    if (c[0] == 'n' && c[1] == 'p' && (c[2] == 'm' || c[2] == 'x') && RZ_WORD_END(c, 3))
+        return 1;
+    // pnpm, pnpx
+    if (c[0] == 'p' && c[1] == 'n' && c[2] == 'p' && (c[3] == 'm' || c[3] == 'x') && RZ_WORD_END(c, 4))
+        return 1;
+    // yarn
+    if (c[0] == 'y' && c[1] == 'a' && c[2] == 'r' && c[3] == 'n' && RZ_WORD_END(c, 4))
+        return 1;
+    // bun, bunx
+    if (c[0] == 'b' && c[1] == 'u' && c[2] == 'n' && (RZ_WORD_END(c, 3) || (c[3] == 'x' && RZ_WORD_END(c, 4))))
+        return 1;
+    // pip, pip3, pipx
+    if (c[0] == 'p' && c[1] == 'i' && c[2] == 'p' &&
+        (RZ_WORD_END(c, 3) || ((c[3] == '3' || c[3] == 'x') && RZ_WORD_END(c, 4))))
+        return 1;
+    // uv, uvx
+    if (c[0] == 'u' && c[1] == 'v' && (RZ_WORD_END(c, 2) || (c[2] == 'x' && RZ_WORD_END(c, 3))))
+        return 1;
+    // poetry
+    if (c[0] == 'p' && c[1] == 'o' && c[2] == 'e' && c[3] == 't' && c[4] == 'r' && c[5] == 'y' && RZ_WORD_END(c, 6))
+        return 1;
+    // cargo
+    if (c[0] == 'c' && c[1] == 'a' && c[2] == 'r' && c[3] == 'g' && c[4] == 'o' && RZ_WORD_END(c, 5))
+        return 1;
+    // gem
+    if (c[0] == 'g' && c[1] == 'e' && c[2] == 'm' && RZ_WORD_END(c, 3))
+        return 1;
+    return 0;
+}
+
 static __always_inline int is_ai_agent(const char *comm) {
+    if (is_package_manager(comm))
+        return 0;
+
     // Known AI agent process names
 
     // "claude" (matches claude, claude.real, claude-code, etc.)
@@ -85,12 +127,13 @@ static __always_inline int is_ai_agent(const char *comm) {
     if (comm[0] == 'h' && comm[1] == 'e' && comm[2] == 'r' && comm[3] == 'm' && comm[4] == 'e' && comm[5] == 's')
         return 1;
 
-    // Any "claw"-family agent: comm CONTAINS the substring "claw"
-    // (nanoclaw, nemoclaw, openclaw, closedclaw, trustclaw, ...). Bounded
-    // substring scan over the 16-byte comm; unrolled for the verifier.
+    // Any "claw"-family agent: the comm's FIRST WORD contains "claw"
+    // (nanoclaw, nemoclaw, openclaw, closedclaw, trustclaw, ...). Only the first
+    // word: a later word is an argument a program put in its own name, not who
+    // it is. Bounded scan over the 16-byte comm; unrolled for the verifier.
     #pragma unroll
     for (int i = 0; i + 3 < MAX_COMM_LEN; i++) {
-        if (comm[i] == '\0')
+        if (comm[i] == '\0' || comm[i] == ' ')
             break;
         if (comm[i] == 'c' && comm[i+1] == 'l' && comm[i+2] == 'a' && comm[i+3] == 'w')
             return 1;
