@@ -701,6 +701,12 @@ enum Commands {
         action: ProfileCommands,
     },
 
+    /// Remote MCP servers managed through Ring Zero's gateway, and their tools
+    Mcp {
+        #[command(subcommand)]
+        action: McpCommands,
+    },
+
     /// Non-Human Identity inventory
     Nhi,
 
@@ -917,6 +923,27 @@ enum ProfileCommands {
     },
     /// Remove a profile by name
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum McpCommands {
+    /// Managed servers, their tools and which are switched off
+    List,
+    /// Route every agent's remote MCP servers through the gateway
+    /// (rewrites each agent's config; a backup is kept next to it)
+    Adopt,
+    /// Stop managing a server (or --all) and point its agent back at it
+    Release {
+        id: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Switch one tool of a managed server on or off
+    Tool {
+        id: String,
+        tool: String,
+        state: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2416,6 +2443,237 @@ async fn cmd_profile_set(api: &str, json: &str) -> Result<()> {
     }
 }
 
+// ── MCP gateway ──────────────────────────────────────────────────────────────
+
+/// The gateway's address for one managed server, as agents see it.
+fn mcp_gateway_url(api: &str, id: &str) -> String {
+    format!("{}/mcp/{id}", api.trim_end_matches('/'))
+}
+
+/// A stable id for a server: name, agent and owner, in path-safe characters.
+fn mcp_id(name: &str, agent: &str, owner: &str) -> String {
+    let raw = format!("{name}-{agent}-{owner}");
+    let id: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    id.chars().take(64).collect()
+}
+
+/// In an agent's MCP config, find the server called `name` whose address is
+/// `from`, and change that address to `to`. Returns true when it changed.
+fn mcp_rewrite_url(v: &mut serde_json::Value, name: &str, from: &str, to: &str) -> bool {
+    let mut changed = false;
+    let mut visit = |servers: &mut serde_json::Value| {
+        if let Some(entry) = servers.get_mut(name) {
+            for key in ["url", "httpUrl", "serverUrl"] {
+                let hit = entry.get(key).and_then(|u| u.as_str()).is_some_and(|u| {
+                    u.split('?').next() == Some(from.split('?').next().unwrap_or(from))
+                });
+                if hit {
+                    entry[key] = serde_json::Value::String(to.to_string());
+                    changed = true;
+                }
+            }
+        }
+    };
+    for ptr in ["/mcp", "/mcpServers", "/servers", "/mcp/servers"] {
+        if let Some(s) = v.pointer_mut(ptr) {
+            visit(s);
+        }
+    }
+    // Claude Code keeps project-scoped servers under projects.<path>.mcpServers.
+    if let Some(projects) = v.get_mut("projects").and_then(|p| p.as_object_mut()) {
+        for (_, proj) in projects.iter_mut() {
+            if let Some(s) = proj.get_mut("mcpServers") {
+                visit(s);
+            }
+        }
+    }
+    changed
+}
+
+/// Rewrite one config file in place: a timestamped backup first, the same
+/// owner and mode after, written atomically.
+fn mcp_edit_config(path: &str, name: &str, from: &str, to: &str) -> Result<bool> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {path}"))?;
+    let mut v: serde_json::Value = serde_json::from_str(&text).with_context(|| {
+        format!("{path} is not plain JSON (comments?); change the server's url by hand")
+    })?;
+    if !mcp_rewrite_url(&mut v, name, from, to) {
+        return Ok(false);
+    }
+    let meta = std::fs::metadata(path)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = format!("{path}.rz-backup-{stamp}");
+    std::fs::copy(path, &backup).with_context(|| format!("cannot back up {path}"))?;
+    let tmp = format!("{path}.rz-tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&v)? + "\n")?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(meta.mode() & 0o7777))?;
+    for f in [&tmp, &backup] {
+        let c = std::ffi::CString::new(f.as_str())?;
+        unsafe {
+            libc::chown(c.as_ptr(), meta.uid(), meta.gid());
+        }
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(true)
+}
+
+async fn cmd_mcp_list(api: &str) -> Result<()> {
+    let reg = fetch_json(&format!("{api}/api/v1/mcp/gateway")).await?;
+    let servers = reg["servers"].as_object().cloned().unwrap_or_default();
+    if servers.is_empty() {
+        println!("No MCP servers are managed yet. `sudo rz mcp adopt` routes every agent's remote servers through Ring Zero.");
+        return Ok(());
+    }
+    for (id, s) in servers {
+        println!(
+            "{id}  ({} via {}) -> {}",
+            s["name"].as_str().unwrap_or(""),
+            s["agent"].as_str().unwrap_or(""),
+            s["upstream"].as_str().unwrap_or("")
+        );
+        let off: Vec<&str> = s["disabled_tools"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|t| t.as_str()).collect())
+            .unwrap_or_default();
+        if let Some(seen) = s["seen_tools"].as_object() {
+            for (t, d) in seen {
+                let mark = if off.contains(&t.as_str()) {
+                    "off"
+                } else {
+                    "on "
+                };
+                println!("    [{mark}] {t}  {}", d.as_str().unwrap_or(""));
+            }
+        }
+        for t in off.iter().filter(|t| !s["seen_tools"].get(**t).is_some()) {
+            println!("    [off] {t}");
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_mcp_adopt(api: &str) -> Result<()> {
+    let inv = fetch_json(&format!("{api}/api/v1/discovery/inventory")).await?;
+    let gateway_prefix = format!("{}/mcp/", api.trim_end_matches('/'));
+    let mut adopted = 0;
+    for m in inv["mcp_servers"].as_array().cloned().unwrap_or_default() {
+        let (name, agent, owner) = (
+            m["name"].as_str().unwrap_or(""),
+            m["agent"].as_str().unwrap_or(""),
+            m["owner"].as_str().unwrap_or(""),
+        );
+        let (Some(url), Some(source)) = (m["url"].as_str(), m["source"].as_str()) else {
+            continue;
+        };
+        if m["transport"].as_str() != Some("http") || url.starts_with(&gateway_prefix) {
+            continue;
+        }
+        if !m["flags"]
+            .as_array()
+            .is_some_and(|f| f.iter().any(|x| x == "remote"))
+        {
+            continue;
+        }
+        let id = mcp_id(name, agent, owner);
+        // Register first: the gateway must know the server before any agent
+        // is pointed at it.
+        let v = put_json(
+            &format!("{api}/api/v1/mcp/gateway"),
+            serde_json::json!({"id": id, "name": name, "agent": agent, "owner": owner, "upstream": url, "source": source}),
+        )
+        .await?;
+        if v["ok"].as_bool() != Some(true) {
+            eprintln!(
+                "  {name} ({agent}): {}",
+                v["error"].as_str().unwrap_or("the daemon refused it")
+            );
+            continue;
+        }
+        match mcp_edit_config(source, name, url, &mcp_gateway_url(api, &id)) {
+            Ok(true) => {
+                adopted += 1;
+                println!(
+                    "Managed: {name} ({agent}, {owner}) -> {}",
+                    mcp_gateway_url(api, &id)
+                );
+            }
+            Ok(false) => eprintln!(
+                "  {name} ({agent}): its entry in {source} was not found; nothing changed"
+            ),
+            Err(e) => eprintln!("  {name} ({agent}): {e:#}"),
+        }
+    }
+    println!(
+        "{adopted} server(s) now go through Ring Zero. Agents cannot reach them directly. Restart running agents to pick up the change."
+    );
+    Ok(())
+}
+
+async fn cmd_mcp_release(api: &str, id: Option<&str>, all: bool) -> Result<()> {
+    let reg = fetch_json(&format!("{api}/api/v1/mcp/gateway")).await?;
+    let servers = reg["servers"].as_object().cloned().unwrap_or_default();
+    let chosen: Vec<_> = servers
+        .iter()
+        .filter(|(k, _)| all || Some(k.as_str()) == id)
+        .collect();
+    if chosen.is_empty() {
+        anyhow::bail!("name a managed server (see `rz mcp list`) or pass --all");
+    }
+    for (k, s) in chosen {
+        let (name, upstream, source) = (
+            s["name"].as_str().unwrap_or(""),
+            s["upstream"].as_str().unwrap_or(""),
+            s["source"].as_str().unwrap_or(""),
+        );
+        if !source.is_empty() {
+            match mcp_edit_config(source, name, &mcp_gateway_url(api, k), upstream) {
+                Ok(_) => {}
+                Err(e) => eprintln!("  {name}: {e:#}"),
+            }
+        }
+        delete_json(&format!("{api}/api/v1/mcp/gateway/{k}")).await?;
+        println!("Released: {name} -> {upstream}");
+    }
+    Ok(())
+}
+
+async fn cmd_mcp_tool(api: &str, id: &str, tool: &str, state: &str) -> Result<()> {
+    let enabled = match state {
+        "on" => true,
+        "off" => false,
+        _ => anyhow::bail!("use: rz mcp tool <server-id> <tool> on|off"),
+    };
+    let v = put_json(
+        &format!("{api}/api/v1/mcp/gateway/{id}/tools"),
+        serde_json::json!({"tool": tool, "enabled": enabled}),
+    )
+    .await?;
+    if v["ok"].as_bool() == Some(true) {
+        println!("{tool} of {id} is now {state}.");
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "{}",
+            v["error"]
+                .as_str()
+                .unwrap_or("the daemon refused the change")
+        )
+    }
+}
+
 async fn cmd_profile_remove(api: &str, name: &str) -> Result<()> {
     let enc: String = name
         .bytes()
@@ -3364,6 +3622,13 @@ async fn main() -> Result<()> {
             ProfileCommands::Show => cmd_profile_show(&api).await,
             ProfileCommands::Set { json } => cmd_profile_set(&api, &json).await,
             ProfileCommands::Remove { name } => cmd_profile_remove(&api, &name).await,
+        },
+
+        Commands::Mcp { action } => match action {
+            McpCommands::List => cmd_mcp_list(&api).await,
+            McpCommands::Adopt => cmd_mcp_adopt(&api).await,
+            McpCommands::Release { id, all } => cmd_mcp_release(&api, id.as_deref(), all).await,
+            McpCommands::Tool { id, tool, state } => cmd_mcp_tool(&api, &id, &tool, &state).await,
         },
 
         Commands::Nhi => cmd_nhi(&api).await,

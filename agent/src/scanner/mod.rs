@@ -7,6 +7,7 @@ pub mod baseline;
 pub mod entropy;
 pub mod inventory;
 pub mod jev_layer;
+pub mod mcp_tools;
 pub mod model_armor;
 pub mod osv;
 pub mod patterns;

@@ -858,6 +858,60 @@ fn comm_key(name: &str) -> [u8; MAX_COMM_LEN] {
     key
 }
 
+/// Replace the MCP-upstream address sets: add the new ones first, then drop the
+/// ones no longer wanted, so there is no moment when a managed server is open.
+fn apply_mcp_upstreams(bpf: &mut Bpf, ips: &[std::net::IpAddr]) {
+    let v4: std::collections::HashSet<u32> = ips
+        .iter()
+        .filter_map(|ip| match ip {
+            std::net::IpAddr::V4(a) => Some(u32::from_ne_bytes(a.octets())),
+            std::net::IpAddr::V6(a) => a.to_ipv4_mapped().map(|m| u32::from_ne_bytes(m.octets())),
+        })
+        .collect();
+    let v6: std::collections::HashSet<[u8; 16]> = ips
+        .iter()
+        .filter_map(|ip| match ip {
+            std::net::IpAddr::V6(a) if a.to_ipv4_mapped().is_none() => Some(a.octets()),
+            _ => None,
+        })
+        .collect();
+    if let Some(m) = bpf.map_mut("mcp_upstream_ips") {
+        if let Ok(mut map) = AyaHashMap::<_, u32, u8>::try_from(m) {
+            for ip in &v4 {
+                let _ = map.insert(*ip, 1u8, 0);
+            }
+            let stale: Vec<u32> = map
+                .keys()
+                .filter_map(|k| k.ok())
+                .filter(|k| !v4.contains(k))
+                .collect();
+            for k in stale {
+                let _ = map.remove(&k);
+            }
+        }
+    }
+    if let Some(m) = bpf.map_mut("mcp_upstream_ip6") {
+        if let Ok(mut map) = AyaHashMap::<_, [u8; 16], u8>::try_from(m) {
+            for ip in &v6 {
+                let _ = map.insert(*ip, 1u8, 0);
+            }
+            let stale: Vec<[u8; 16]> = map
+                .keys()
+                .filter_map(|k| k.ok())
+                .filter(|k| !v6.contains(k))
+                .collect();
+            for k in stale {
+                let _ = map.remove(&k);
+            }
+        }
+    }
+    info!(
+        v4 = v4.len(),
+        v6 = v6.len(),
+        "MCP gateway: agents refused direct connections to managed servers"
+    );
+}
+
 /// Fill the control lists from the switches. Idempotent: every entry a switch
 /// owns is inserted when it is on and removed when it is off.
 fn apply_controls(bpf: &mut Bpf, c: &crate::config::ControlsSection) {
@@ -1387,6 +1441,7 @@ pub fn apply_command(bpf: &mut Bpf, cmd: &EbpfCommand) {
             }
         }
         EbpfCommand::SetControls(c) => apply_controls(bpf, c),
+        EbpfCommand::SetMcpUpstreams(ips) => apply_mcp_upstreams(bpf, ips),
         EbpfCommand::SyncProfiles(st) => apply_profiles(bpf, st),
         EbpfCommand::TagProfileSlot { pid, slot } => {
             if let Some(m) = bpf.map_mut("agent_descendants") {
@@ -1675,6 +1730,9 @@ pub enum EbpfCommand {
     SetTamperProtect(bool),
     /// Re-apply the kernel controls (admin tools, escape tools, instruction files).
     SetControls(crate::config::ControlsSection),
+    /// Addresses of remote MCP servers the gateway manages. Replaces the set:
+    /// agent trees may not connect to these directly.
+    SetMcpUpstreams(Vec<std::net::IpAddr>),
     /// Load the capability profiles (slots, programs, addresses) into the kernel.
     SyncProfiles(crate::policy::capability::KernelProfiles),
     /// Put a process (an agent found by command line, or an MCP server) under

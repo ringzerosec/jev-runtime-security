@@ -393,6 +393,42 @@ impl Narrator {
                     }
                 }
             }
+            EventKind::McpToolCall => {
+                let s = |k: &str| {
+                    extra
+                        .and_then(|x| x.get(k))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                };
+                let (server, tool) = (s("mcp_server"), s("tool"));
+                self.flush_reads(&mut st);
+                if extra.and_then(|x| x.get("held")).and_then(|v| v.as_bool()) == Some(true) {
+                    let host = s("host");
+                    self.push(
+                        &mut st,
+                        Level::Alert,
+                        &agent,
+                        "blocked",
+                        format!("{agent}'s config gained a new MCP server, {server} ({host}). Ring Zero Security is holding it: no agent can reach it until an administrator approves it."),
+                    );
+                } else if ev.allowed {
+                    self.push(
+                        &mut st,
+                        Level::Info,
+                        &agent,
+                        "tool",
+                        format!("{agent} is using the {tool} tool of the {server} MCP server."),
+                    );
+                } else {
+                    self.push(
+                        &mut st,
+                        Level::Alert,
+                        &agent,
+                        "blocked",
+                        format!("{agent} tried to use the {tool} tool of the {server} MCP server, which is switched off. Ring Zero Security refused."),
+                    );
+                }
+            }
             _ => self.narrate_kernel(&mut st, &agent, ev),
         }
     }
@@ -547,6 +583,16 @@ impl Narrator {
         }
 
         if !ev.allowed {
+            // Kernel DNS records sometimes carry a fragment instead of a host
+            // (".so.1", "14.0", "e"). Saying "tried to connect to .so.1" is
+            // noise, not news: only narrate a refusal we can name properly.
+            if matches!(
+                ev.kind,
+                EventKind::NetworkConnect | EventKind::NetworkSend | EventKind::DnsQuery
+            ) && !nameable_host(refused_host(&ev.target))
+            {
+                return;
+            }
             self.flush_reads(st);
             let text = match ev.kind {
                 EventKind::ProcessExec => {
@@ -558,11 +604,7 @@ impl Narrator {
                     }
                 }
                 EventKind::NetworkConnect | EventKind::NetworkSend | EventKind::DnsQuery => {
-                    let host = ev
-                        .target
-                        .rsplit_once(':')
-                        .map(|(h, _)| h)
-                        .unwrap_or(&ev.target);
+                    let host = refused_host(&ev.target);
                     format!("{agent} tried to connect to {host}, which isn't approved. Blocked.")
                 }
                 _ => match describe_protected(&lower, &ev.kind) {
@@ -839,6 +881,38 @@ fn base_name(path: &str) -> String {
     p.rsplit('/').next().unwrap_or(p).to_string()
 }
 
+/// The host in a network event's target ("1.2.3.4:443", "[::1]:443", "name").
+fn refused_host(target: &str) -> &str {
+    let t = target.trim();
+    if let Some(rest) = t.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    match t.rsplit_once(':') {
+        Some((h, p)) if !h.contains(':') && p.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => t,
+    }
+}
+
+/// Something a person would recognise as a place: a routable IP address, or a
+/// host name with a real top-level label. Not "0.0.0.0", ".so.1" or "14.0".
+fn nameable_host(h: &str) -> bool {
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return !ip.is_unspecified() && !ip.is_loopback();
+    }
+    let h = h.trim_end_matches('.');
+    let labels: Vec<&str> = h.split('.').collect();
+    labels.len() >= 2
+        && labels.iter().all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+        && labels
+            .last()
+            .is_some_and(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()))
+        && labels.last() != Some(&"so")
+}
+
 fn host_of(s: &str) -> String {
     for tok in s.split_whitespace() {
         if let Some(rest) = tok.split("://").nth(1) {
@@ -1003,6 +1077,72 @@ mod tests {
                 "Claude Code tried to install packages with npm install left-pad. Ring Zero Security refused: agents can't install packages.".into()
             )]
         );
+    }
+
+    #[test]
+    fn mcp_gateway_calls_are_narrated() {
+        let n = fresh();
+        let mut a = ev(
+            EventKind::McpToolCall,
+            "opencode",
+            "MCP_TOOL:deepwiki/ask_question",
+            true,
+        );
+        a.extra = Some(serde_json::json!({"mcp_server": "deepwiki", "tool": "ask_question"}));
+        n.observe(&a);
+        let mut r = ev(
+            EventKind::McpToolCall,
+            "opencode",
+            "MCP_TOOL:deepwiki/read_wiki_contents",
+            false,
+        );
+        r.extra = Some(serde_json::json!({"mcp_server": "deepwiki", "tool": "read_wiki_contents"}));
+        n.observe(&r);
+        let t = texts(&n);
+        assert!(t.iter().any(|(l, x)| *l == Level::Info
+            && x.contains("using the ask_question tool of the deepwiki MCP server")));
+        assert!(t.iter().any(|(l, x)| *l == Level::Alert
+            && x.contains("read_wiki_contents")
+            && x.contains("switched off")));
+    }
+
+    #[test]
+    fn fragments_are_not_narrated_as_hosts() {
+        let n = fresh();
+        for t in [
+            ".so.1",
+            "14.0",
+            "e",
+            "2a629c0fec3eff8d74cdae",
+            "0.0.0.0:443",
+            "y",
+        ] {
+            n.observe(&ev(EventKind::DnsQuery, "opencode", t, false));
+        }
+        assert!(
+            texts(&n)
+                .iter()
+                .all(|(_, t)| !t.contains("tried to connect")),
+            "{:?}",
+            texts(&n)
+        );
+        n.observe(&ev(
+            EventKind::NetworkConnect,
+            "opencode",
+            "mcp.deepwiki.com:443",
+            false,
+        ));
+        n.observe(&ev(
+            EventKind::NetworkConnect,
+            "opencode",
+            "203.0.113.50:443",
+            false,
+        ));
+        let t = texts(&n);
+        assert!(t
+            .iter()
+            .any(|(_, x)| x.contains("connect to mcp.deepwiki.com")));
+        assert!(t.iter().any(|(_, x)| x.contains("connect to 203.0.113.50")));
     }
 
     #[test]

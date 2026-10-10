@@ -215,6 +215,19 @@ pub fn make_router(state: ApiState) -> Router {
         // Skill scanner — auto-enumerate every agent's skill surface
         .route("/api/v1/skill-scan/auto", post(scan_skills_auto))
         .route("/api/v1/discovery/inventory", get(discovery_inventory))
+        // MCP gateway: agents' remote MCP servers, managed by Ring Zero. The
+        // /mcp/ path is outside /api/, so agents reach it without a token; it
+        // answers on loopback only. Management is full-scope (rz, password).
+        .route("/mcp/:id", axum::routing::any(mcp_gateway_proxy))
+        .route(
+            "/api/v1/mcp/gateway",
+            get(mcp_gateway_list).put(mcp_gateway_upsert),
+        )
+        .route("/api/v1/mcp/gateway/:id", delete(mcp_gateway_remove))
+        .route(
+            "/api/v1/mcp/gateway/:id/tools",
+            axum::routing::put(mcp_gateway_tool),
+        )
         .route(
             "/api/v1/policy/profiles",
             get(policy_profiles).put(policy_profile_upsert),
@@ -2234,12 +2247,150 @@ async fn scan_skills(
 /// Every AI agent, IDE AI extension, MCP server and local model runtime found
 /// across all users, with whether enforcement covers each agent. Read-only:
 /// discovery reads directory listings and config files and never executes what
-/// it finds; MCP secrets are reported by name only.
+/// it finds; MCP secrets are reported by name only. For a remote MCP server
+/// whose config holds no credentials it also asks the server, over the
+/// standard MCP handshake, which tools it offers (cached ten minutes).
 async fn discovery_inventory(State(_state): State<ApiState>) -> impl IntoResponse {
-    let inv = tokio::task::spawn_blocking(crate::scanner::inventory::collect)
+    let mut inv = tokio::task::spawn_blocking(crate::scanner::inventory::collect)
         .await
         .unwrap_or_default();
+    let mut asks = tokio::task::JoinSet::new();
+    for (i, m) in inv.mcp_servers.iter_mut().enumerate() {
+        if m.transport == "stdio" {
+            m.tools_note = Some(
+                "Local server: tools are not listed, because discovery never starts it.".into(),
+            );
+            continue;
+        }
+        if m.flags.iter().any(|f| f == "credentials in config") {
+            m.tools_note =
+                Some("Needs sign-in: Ring Zero does not send your credentials to ask it.".into());
+            continue;
+        }
+        if m.transport != "http" || !m.flags.iter().any(|f| f == "remote") {
+            m.tools_note = Some("Tools are not listed for this kind of server.".into());
+            continue;
+        }
+        if let Some(url) = m.url.clone() {
+            asks.spawn(async move { (i, crate::scanner::mcp_tools::tools_for(&url).await) });
+        }
+    }
+    while let Some(Ok((i, r))) = asks.join_next().await {
+        if let Some(m) = inv.mcp_servers.get_mut(i) {
+            match r {
+                Ok(t) => m.tools = Some(t),
+                Err(e) => m.tools_note = Some(format!("Tools not listed: {e}.")),
+            }
+        }
+    }
     Json(inv)
+}
+
+// ── MCP gateway ──────────────────────────────────────────────────────────────
+
+/// ANY /mcp/:id — an agent speaking MCP to one of its managed servers.
+async fn mcp_gateway_proxy(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    method: Method,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let record = |ev: SecurityEvent| {
+        if !ev.allowed {
+            state.threats_blocked.fetch_add(1, Ordering::Relaxed);
+        }
+        state.events_total.fetch_add(1, Ordering::Relaxed);
+        let _ = state.timeline.insert(&ev);
+        state
+            .ipc
+            .broadcast(crate::common::protocol::DaemonMessage::Event { payload: ev });
+    };
+    crate::mcp_gateway::handle(id, peer, method, headers, body, record).await
+}
+
+/// GET /api/v1/mcp/gateway — the managed servers, their switches and the
+/// tools each has offered.
+async fn mcp_gateway_list() -> impl IntoResponse {
+    Json(crate::mcp_gateway::snapshot())
+}
+
+/// PUT /api/v1/mcp/gateway — register or update one managed server.
+async fn mcp_gateway_upsert(
+    State(state): State<ApiState>,
+    Json(s): Json<crate::mcp_gateway::ManagedServer>,
+) -> impl IntoResponse {
+    match crate::mcp_gateway::upsert(s) {
+        Ok(s) => {
+            let _ = state.audit.append(
+                crate::audit::AuditEntryType::PolicyChange,
+                serde_json::json!({"action": "mcp_gateway_adopt", "id": s.id, "upstream": s.upstream}),
+            );
+            crate::mcp_gateway::sync_kernel().await;
+            crate::mcp_gateway::seed_tools(&s.id, &s.upstream).await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"ok": true, "server": s})),
+            )
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok": false, "error": e})),
+        ),
+    }
+}
+
+/// DELETE /api/v1/mcp/gateway/:id — stop managing one server.
+async fn mcp_gateway_remove(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match crate::mcp_gateway::remove(&id) {
+        Ok(()) => {
+            let _ = state.audit.append(
+                crate::audit::AuditEntryType::PolicyChange,
+                serde_json::json!({"action": "mcp_gateway_release", "id": id}),
+            );
+            crate::mcp_gateway::sync_kernel().await;
+            (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"ok": false, "error": e})),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct ToolSwitch {
+    tool: String,
+    enabled: bool,
+}
+
+/// PUT /api/v1/mcp/gateway/:id/tools — switch one tool on or off.
+async fn mcp_gateway_tool(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Json(t): Json<ToolSwitch>,
+) -> impl IntoResponse {
+    match crate::mcp_gateway::set_tool(&id, &t.tool, t.enabled) {
+        Ok(s) => {
+            let _ = state.audit.append(
+                crate::audit::AuditEntryType::PolicyChange,
+                serde_json::json!({"action": "mcp_gateway_tool", "id": id, "tool": t.tool, "enabled": t.enabled}),
+            );
+            tracing::warn!(server = %id, tool = %t.tool, enabled = t.enabled, "MCP tool switched by an administrator");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"ok": true, "server": s})),
+            )
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok": false, "error": e})),
+        ),
+    }
 }
 
 /// PUT /api/v1/policy/profiles — add or replace one profile (by name).

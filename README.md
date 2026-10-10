@@ -6,7 +6,7 @@
 [![userspace: Apache-2.0](https://img.shields.io/badge/userspace-Apache--2.0-blue)](LICENSE)
 [![kernel: GPL-2.0](https://img.shields.io/badge/kernel-GPL--2.0-blue)](GPL/LICENSE)
 
-**Runtime security for AI coding agents.** Policy is enforced in the kernel, at
+**Runtime security for AI agents.** Policy is enforced in the kernel, at
 the system call — below the agent, and below anything the agent writes. The
 agent's reasoning never gets a vote in whether an operation is allowed.
 
@@ -45,6 +45,38 @@ Ring Zero is the enforced control, placed at the lowest layer the agent runs on.
 | The agent is an identifiable actor | Enforcement authority is root-only. The agent runs as your developer with a **read-only** token and can't turn enforcement off. |
 | Observe actions | One trace keyed on `session_id` joins what it *looked like* the agent would do with what it *actually* did. |
 
+## What it does
+
+- **Discovery.** Every AI agent (coding agents and general-purpose ones such as
+  Hermes Agent and OpenClaw), editor AI extension, MCP server and local model
+  runtime, for every user, with whether enforcement covers it.
+- **Protected data.** Secrets, keys and the files you name are refused to every
+  agent tree, matched by name *and* identity, so a rename or hardlink doesn't
+  dodge it. A refusal records the file's full path.
+- **Agent controls.** Agents can't run admin tools (`sudo`, `su`, `pkexec`, …),
+  can't start work outside their own process (`systemd-run`, `at`, `crontab`),
+  and can't change their own instruction files (optional).
+- **Agents can't install packages.** The kernel holds an agent's package manager
+  before it runs; installs and fetches (`npm install`, `npx`, `pip install`,
+  `uv add`, `cargo install`, …) are refused, everything else (`npm test`,
+  `npm run`, `pip list`) carries on. The agent is told why.
+- **Per-agent limits.** Approved hosts and approved programs per agent, enforced
+  in the kernel, with host names resolved to addresses as they are looked up.
+- **MCP gateway.** `rz mcp adopt` routes agents' remote MCP servers through
+  Ring Zero:
+  - **Per-tool switches.** Switch any tool on or off: a switched-off tool
+    disappears from the agent's tool list, and a call to it is refused.
+  - **No way around it.** The kernel refuses agents a direct connection to the
+    server, so editing the config back doesn't get past the gateway.
+  - **New servers are held.** A server that appears in an agent's config later
+    is held until you approve it.
+- **Live commentary.** What each agent is doing and what was refused, in plain
+  words, live and per session.
+- **Security history.** Every refusal in the last 24 hours: what, which agent,
+  which control, the full path.
+- **Every policy change asks for the administrator password.** Agents hold a
+  read-only token and can't answer the prompt.
+
 ## The one rule
 
 **Enforcement is deterministic. Models never decide the syscall.**
@@ -66,6 +98,9 @@ sudo apt install ./ringzero-security_<version>_<arch>.deb   # amd64 or arm64
 rz status                          # daemon + kernel programs
 bash examples/boundary-demo.sh     # watch a denial: the agent compiles a binary
                                    # that open()s a protected file — kernel refuses
+sudo rz mcp adopt                  # route agents' remote MCP servers through Ring Zero
+rz mcp list                        # managed servers and their tools
+sudo rz mcp tool <server-id> <tool> off
 ```
 
 The desktop viewer is a separate package (`ringzero-desktop`): it reads with the
@@ -77,8 +112,11 @@ can't answer.
 | Operation | This release |
 |---|---|
 | Open, create, delete, rename of a protected file | **Refused in the kernel** |
-| Process execution (`exec`) | **Recorded**, not refused |
-| Outbound connections, DNS, sends, ptrace, mount, kill | **Recorded**, not refused |
+| Admin tools, work outside the agent, package installs | **Refused in the kernel** (agent controls, on by default) |
+| Programs and hosts outside an agent's approved list | **Refused in the kernel** when that agent's profile is set to Block; recorded when set to Watch |
+| Direct connection to a remote MCP server Ring Zero manages or holds | **Refused in the kernel** |
+| A switched-off MCP tool | **Refused by the gateway**; it is also hidden from the agent |
+| Other exec, outbound connections, DNS, sends, ptrace, mount, kill | **Recorded**, not refused |
 
 Off by default, opt-in where you configure them: write-scan enforcement (refuse
 to run an agent-written file a deterministic rule flagged), the egress allowlist,
@@ -93,8 +131,14 @@ and a tool-call hook that can decline a call before it runs.
 - **Cached `sudo` can expose the root token.** In a terminal where you recently
   ran `sudo`, an agent inherits the timestamp. This is a property of `sudo`, not
   Ring Zero; the mitigation and exact `sudoers` snippet are in [SECURITY.md](SECURITY.md).
-- **v1 kernel scope** doesn't yet cover raw-disk reads, snapshots, or
-  hostname-level egress. Exec and network are recorded, not refused.
+- **v1 kernel scope** doesn't yet cover raw-disk reads or snapshots. Exec and
+  network outside the controls above are recorded, not refused.
+- **MCP tool control is for remote (HTTP) servers** routed through the gateway.
+  Local (stdio) MCP servers are governed as processes, by their own profile,
+  not tool by tool. New servers are noticed within about ten seconds of
+  appearing in a config.
+- **`python -m pip install`** runs as python, not pip, so it is caught a moment
+  after it starts rather than before.
 - The checks layer is **off by default** — an untouched install sends nothing off
   the machine.
 
