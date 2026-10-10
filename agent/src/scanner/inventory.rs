@@ -75,6 +75,12 @@ pub struct McpServer {
     pub env_keys: Vec<String>,
     /// Plain-language risk notes, e.g. "remote", "secrets in env".
     pub flags: Vec<String>,
+    /// The tools a remote server offers, asked of the server (see
+    /// `scanner::mcp_tools`). None when not asked; then `tools_note` says why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<crate::scanner::mcp_tools::McpTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools_note: Option<String>,
 }
 
 /// One local model runtime.
@@ -474,6 +480,8 @@ fn mcp_from_json(
         url,
         env_keys,
         flags,
+        tools: None,
+        tools_note: None,
     }
 }
 

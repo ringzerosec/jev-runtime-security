@@ -15,6 +15,7 @@ mod fscache;
 mod health;
 mod integrations;
 mod ipc;
+mod mcp_gateway;
 mod narrator;
 mod platform;
 mod policy;
@@ -562,6 +563,20 @@ async fn async_main() -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
     });
+    // MCP gateway: keep the kernel's set of managed servers' addresses current.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        mcp_gateway::spawn_refresh();
+    });
+    // ...and hold any new remote MCP server an agent's config gains.
+    {
+        let tl = Arc::clone(&timeline);
+        let ipc_mcp = Arc::clone(&ipc);
+        mcp_gateway::spawn_watch(Box::new(move |ev| {
+            let _ = tl.insert(&ev);
+            ipc_mcp.broadcast(common::protocol::DaemonMessage::Event { payload: ev });
+        }));
+    }
 
     let siem_watcher = Arc::clone(&siem);
     let registry_watcher = Arc::clone(&verified_registry);

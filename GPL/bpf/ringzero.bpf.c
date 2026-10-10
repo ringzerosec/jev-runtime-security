@@ -909,6 +909,56 @@ static __always_inline int profile_net_denied(u16 family, u32 ip, const u8 *v6, 
     return bpf_map_lookup_elem(&profile_hosts, &hk) == 0;
 }
 
+// ── MCP gateway upstreams ───────────────────────────────────────────────────
+// Addresses of remote MCP servers that Ring Zero's MCP gateway manages. An
+// agent tree may not connect to them directly: it must go through the gateway
+// on loopback, where per-tool switches apply. The daemon (not an agent) makes
+// the upstream connection. Filled from DNS by the daemon, refreshed each minute.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, u32);       // IPv4, network order
+    __type(value, u8);
+} mcp_upstream_ips SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, struct in6_addr);
+    __type(value, u8);
+} mcp_upstream_ip6 SEC(".maps");
+
+static __always_inline int mcp_upstream_denied(u16 family, u32 ip, const u8 *v6) {
+    if (family == AF_INET6) {
+        int zero10 = 1;
+        #pragma unroll
+        for (int i = 0; i < 10; i++)
+            if (v6[i]) zero10 = 0;
+        if (zero10 && v6[10] == 0xff && v6[11] == 0xff) {
+            __builtin_memcpy(&ip, &v6[12], 4);
+            family = AF_INET;
+        } else {
+            struct in6_addr k = {};
+            __builtin_memcpy(&k, v6, 16);
+            if (!bpf_map_lookup_elem(&mcp_upstream_ip6, &k))
+                return 0;
+            goto agent;
+        }
+    }
+    if (family != AF_INET || !bpf_map_lookup_elem(&mcp_upstream_ips, &ip))
+        return 0;
+agent:;
+    char comm[MAX_COMM_LEN] = {};
+    bpf_get_current_comm(comm, sizeof(comm));
+    return current_process_is_agent(comm);
+}
+
+// Every per-agent network refusal: an adopted MCP server reached directly, or
+// a host outside the agent's approved list.
+static __always_inline int agent_net_denied(u16 family, u32 ip, const u8 *v6, u16 port) {
+    return mcp_upstream_denied(family, ip, v6) || profile_net_denied(family, ip, v6, port);
+}
+
 // Check if filename is sensitive (worth reporting)
 static __always_inline int is_sensitive_file(const char *filename) {
     // Check for sensitive filenames
@@ -1980,7 +2030,7 @@ int BPF_PROG(ringzero_socket_connect, struct socket *sock,
             struct sockaddr_in6 *a6 = (struct sockaddr_in6 *)address;
             bpf_probe_read_kernel(v6b, 16, &a6->sin6_addr);
         }
-        profile_block = profile_net_denied(family, ip, v6b, port);
+        profile_block = agent_net_denied(family, ip, v6b, port);
     }
     int enforce_now = (cfg->egress_enforce && should_block) || profile_block;
 
@@ -2038,7 +2088,7 @@ int BPF_PROG(ringzero_socket_sendmsg, struct socket *sock,
                 __builtin_memcpy(v6b, &a6.sin6_addr, 16);
                 dport = __bpf_ntohs(a6.sin6_port);
             }
-            if ((fam == AF_INET || fam == AF_INET6) && profile_net_denied(fam, dip, v6b, dport)) {
+            if ((fam == AF_INET || fam == AF_INET6) && agent_net_denied(fam, dip, v6b, dport)) {
                 struct event *ne = bpf_ringbuf_reserve(&events, sizeof(*ne), 0);
                 if (ne) {
                     ne->type = EVENT_NETWORK_CONNECT;

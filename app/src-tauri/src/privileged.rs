@@ -131,6 +131,10 @@ pub fn validate(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        // rz mcp adopt / release / tool — the MCP gateway.
+        ["mcp", "adopt"] | ["mcp", "release", "--all"] => Ok(()),
+        ["mcp", "release", id] if mcp_word(id) => Ok(()),
+        ["mcp", "tool", id, tool, "on" | "off"] if mcp_word(id) && mcp_tool_name(tool) => Ok(()),
         // rz sessions terminate <session id> — ends the agent's processes.
         ["sessions", "terminate", id] => {
             if !id.is_empty()
@@ -283,6 +287,23 @@ pub fn run(args: &[String]) -> Outcome {
     }
 }
 
+/// A managed server's id: what `rz mcp adopt` makes, nothing else.
+fn mcp_word(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// A tool name as MCP servers write them: letters, digits, - _ . /
+fn mcp_tool_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +365,17 @@ mod tests {
         assert!(v(&["settings", "set", "admin_tools", "sudo"]).is_err());
         assert!(v(&["sessions", "terminate", "auto-opencode-8795"]).is_ok());
         assert!(v(&["sessions", "terminate", "../x"]).is_err());
+        assert!(v(&["mcp", "adopt"]).is_ok());
+        assert!(v(&[
+            "mcp",
+            "tool",
+            "deepwiki-opencode-vboxuser",
+            "read_wiki_contents",
+            "off"
+        ])
+        .is_ok());
+        assert!(v(&["mcp", "tool", "deepwiki", "--json", "off"]).is_err());
+        assert!(v(&["mcp", "release", "../x"]).is_err());
         assert!(v(&["sessions", "terminate", "a b"]).is_err());
         assert!(
             v(&["settings", "set", "mode", "observe"]).is_err(),

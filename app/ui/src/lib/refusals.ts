@@ -74,6 +74,24 @@ export function describeRefusal(e: RefusalEvent): Refusal {
       changeable: true,
     };
   }
+  if (t.startsWith('MCP_HELD:')) {
+    const server = t.slice('MCP_HELD:'.length);
+    return {
+      sentence: `A new MCP server, ${server}, appeared in ${agent}'s config. It is held: no agent can reach it until you approve it in Discovery.`,
+      what: server,
+      control: 'MCP gateway · new servers are held',
+      changeable: true,
+    };
+  }
+  if (t.startsWith('MCP_TOOL:')) {
+    const [server, tool] = t.slice('MCP_TOOL:'.length).split('/');
+    return {
+      sentence: `${agent} tried to use the ${tool} tool of the ${server} MCP server, which is switched off. Refused.`,
+      what: `${server} · ${tool}`,
+      control: 'MCP gateway · tool switches',
+      changeable: true,
+    };
+  }
   if (t.startsWith('PKG_INSTALL:')) {
     const cmd = t.slice('PKG_INSTALL:'.length);
     return {

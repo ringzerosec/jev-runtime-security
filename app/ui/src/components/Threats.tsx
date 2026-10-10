@@ -153,6 +153,8 @@ export default function Threats({ onNavigate }: { onNavigate?: (page: 'policy') 
   const getDescription = (event: Event) => {
     const t = event.target?.toLowerCase() || '';
     if (t.startsWith('pkg_install:')) return 'Package install refused';
+    if (t.startsWith('mcp_held:')) return 'New MCP server held';
+    if (t.startsWith('mcp_tool:')) return 'MCP tool refused';
     if (t.endsWith(':prompt-secret')) return 'Secret blocked in a prompt';
     if (t.startsWith('tamper:') || t.includes('tamper:')) return 'Tamper attempt refused';
     if (/(^|\/)(api-token|daemon\.toml|profiles\.json|file-access-rules\.json|ringzero-daemon\.service)$/.test(t))
@@ -182,6 +184,8 @@ export default function Threats({ onNavigate }: { onNavigate?: (page: 'policy') 
     const who = agentLabel((event as { process?: string }).process ?? event.skill_name);
     const t = event.target || '';
     if (t.startsWith('PKG_INSTALL:')) return `${who} · ${t.slice('PKG_INSTALL:'.length)}`;
+    if (t.startsWith('MCP_HELD:')) return `${who} · ${t.slice('MCP_HELD:'.length)} · waiting for approval`;
+    if (t.startsWith('MCP_TOOL:')) return `${who} · ${t.slice('MCP_TOOL:'.length).replace('/', ' · ')}`;
     if (t.endsWith(':prompt-secret')) return `${who} · the secret was masked and the prompt not sent`;
     if (t.startsWith('TAMPER:') || t.includes('TAMPER:')) return `${who} · ${t.replace(/^.*TAMPER:/, '').replace(/_/g, ' ')}`;
     return who ? `${who} · ${t}` : t;
