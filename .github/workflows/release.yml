@@ -62,10 +62,12 @@ jobs:
           SHA256_arm64: d68443d945c146080151eb215bebaa400294ab7ada22af4f5d0a940f5992b9d9
         run: |
           arch=${{ matrix.arch }}
-          tgz="bpftool-${BPFTOOL_VERSION}-${arch}.tar.gz"
+          # Download outside the checkout, so the build's version is not "dirty".
+          tgz="$RUNNER_TEMP/bpftool-${BPFTOOL_VERSION}-${arch}.tar.gz"
           curl -fsSL -o "$tgz" "https://github.com/libbpf/bpftool/releases/download/${BPFTOOL_VERSION}/${tgz}"
           want_var="SHA256_${arch}"
           echo "${!want_var}  $tgz" | sha256sum -c -
+          git status --porcelain
           mkdir -p "$RUNNER_TEMP/bpftool"
           tar -xzf "$tgz" -C "$RUNNER_TEMP/bpftool"
           BPFTOOL=$(find "$RUNNER_TEMP/bpftool" -name bpftool -type f | head -1)
