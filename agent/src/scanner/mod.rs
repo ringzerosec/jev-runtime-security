@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // scanner — entropy + secret detection + supply chain scanning
 // Heuristic patterns cover injection detection,
 // entropy + secret detector covers supply chain risk.

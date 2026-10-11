@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // analyzer/baseline.rs — Per-agent behavioral baseline + anomaly detection
 //
 // Replaces fixed thresholds in heuristics.rs with statistical deviations

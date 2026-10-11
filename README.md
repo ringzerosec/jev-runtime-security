@@ -3,7 +3,7 @@
 # Ring Zero Security
 
 [![build](https://github.com/ringzerosec/jev-runtime-security/actions/workflows/ci.yml/badge.svg)](https://github.com/ringzerosec/jev-runtime-security/actions/workflows/ci.yml)
-[![userspace: Apache-2.0](https://img.shields.io/badge/userspace-Apache--2.0-blue)](LICENSE)
+[![userspace: PolyForm Noncommercial](https://img.shields.io/badge/userspace-PolyForm%20Noncommercial-blue)](LICENSE)
 [![kernel: GPL-2.0](https://img.shields.io/badge/kernel-GPL--2.0-blue)](GPL/LICENSE)
 
 **Runtime security for AI agents.** Policy is enforced in the kernel, at
@@ -144,10 +144,14 @@ and a tool-call hook that can decline a call before it runs.
 
 ## Licensing
 
-Apache-2.0 for the whole repository **except** `GPL/`, which is GPL-2.0 (Linux
-won't load a BPF LSM program without a GPL-compatible license). The userspace
-loader links compiled BPF objects only; no BPF source compiles into the
-Apache-2.0 side. Third-party attribution: [NOTICE](NOTICE).
+[PolyForm Noncommercial 1.0.0](LICENSE) for the whole repository **except**
+`GPL/`, which is GPL-2.0 (Linux won't load a BPF LSM program without a
+GPL-compatible license). The userspace loader links compiled BPF objects only;
+no BPF source compiles into the PolyForm side.
+
+Free for individuals and noncommercial organisations. Businesses need a
+commercial license: see [COMMERCIAL.md](COMMERCIAL.md). Third-party
+attribution: [NOTICE](NOTICE).
 
 ## More
 

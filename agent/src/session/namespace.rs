@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // session/namespace.rs — Mount-namespace JIT access control
 //
 // When an AI agent runs inside a Linux mount+PID namespace (via `rz sandbox`),

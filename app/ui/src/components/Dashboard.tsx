@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { daemonFetch, daemonApi } from '../lib/daemonApi';
 import type { Page } from '../App';

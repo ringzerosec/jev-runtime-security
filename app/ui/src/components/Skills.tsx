@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Skills.tsx — Agent skill-surface scanner redesigned as a security audit report.
 // Auto-discovers every installed AI agent's skills/plugins/rules/MCP configs
 // across the host and scans them for prompt injection + supply-chain risk.

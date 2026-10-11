@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Third-party actions are pinned to a commit SHA, not a tag.
 #
 # A tag is mutable: whoever controls the action repository can move v4 to new
@@ -51,7 +51,7 @@ jobs:
       # its own `desktop viewer` job, which installs that stack. Excluding it here
       # keeps the daemon build free of GUI system deps — "a GUI build failure must
       # never block the daemon."
-      - name: Build the userspace (Apache-2.0 side)
+      - name: Build the userspace (PolyForm side)
         run: cargo build --workspace --exclude ringzero-app
 
       - name: Test
@@ -118,8 +118,8 @@ jobs:
                   head = '\n'.join(open(p, encoding='utf-8', errors='ignore').read().splitlines()[:5])
                   if 'SPDX-License-Identifier' not in head:
                       bad.append(p); continue
-                  # GPL/ must be GPL-2.0; everything else must be Apache-2.0
-                  want = 'GPL-2.0' if p.startswith('./GPL/') else 'Apache-2.0'
+                  # GPL/ must be GPL-2.0; everything else must be PolyForm-Noncommercial-1.0.0
+                  want = 'GPL-2.0' if p.startswith('./GPL/') else 'PolyForm-Noncommercial-1.0.0'
                   if want not in head:
                       bad.append(f'{p} (expected {want})')
           if bad:
@@ -133,7 +133,7 @@ jobs:
         run: |
           stray=$(find . -name '*.bpf.c' -not -path './GPL/*' -not -path './target/*')
           if [ -n "$stray" ]; then
-            echo "BPF source outside GPL/ would put GPL code in the Apache tree:"
+            echo "BPF source outside GPL/ would put GPL code in the PolyForm tree:"
             echo "$stray"
             exit 1
           fi
@@ -145,7 +145,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - name: Fail on copyleft or non-OSS licences in the Apache userspace
+      - name: Fail on copyleft licences in the userspace dependencies
         run: |
           cargo metadata --format-version 1 --all-features > /tmp/meta.json
           python3 - <<'PY'

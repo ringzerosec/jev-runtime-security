@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pattern detection: Tool Misuse (TM1-TM3)
 // Ported from NVIDIA SkillSpector static_patterns_tool_misuse.py
 

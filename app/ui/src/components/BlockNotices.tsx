@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // BlockNotices.tsx — a quiet notice when Ring Zero Security refuses something.
 //
 // Replaces the old modal. It does not cover the screen, groups refusals that

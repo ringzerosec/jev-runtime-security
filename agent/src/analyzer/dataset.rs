@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // analyzer/dataset.rs — distillation training-data exporter.
 //
 // The on-device "security engineer brain" is a TINY language model fine-tuned

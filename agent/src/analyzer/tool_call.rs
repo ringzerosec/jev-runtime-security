@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // analyzer/tool_call.rs — the runtime structured-action interface.
 //
 // The fine-tuned on-device FunctionGemma reads a provenance-graph context and

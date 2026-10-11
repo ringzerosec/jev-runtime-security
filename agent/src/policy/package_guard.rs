@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! Agents can't install packages.
 //!
 //! The kernel stops a process in an agent's tree the moment it becomes a

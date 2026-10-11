@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // scanner/watcher.rs — FSEvents/inotify watcher for known skill install paths
 // Uses the `notify` crate (cross-platform).
 //

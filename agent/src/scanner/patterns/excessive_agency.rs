@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pattern detection: Excessive Agency (EA1-EA4)
 // Ported from NVIDIA SkillSpector static_patterns_excessive_agency.py
 

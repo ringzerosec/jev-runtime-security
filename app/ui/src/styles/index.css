@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: Apache-2.0 */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /* Self-hosted Geist fonts (woff2 bundled under src/assets/fonts). Was a remote
    @import from fonts.googleapis.com — that request is RENDER-BLOCKING, so on a
    machine with slow/filtered internet (VMs, air-gapped installs) WebKit blocked

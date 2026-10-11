@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // secrets/dlp.rs — Context-aware API key routing / Data Loss Prevention
 // Intercepts outbound network payloads and ensures API keys only reach
 // their legitimate service endpoints.

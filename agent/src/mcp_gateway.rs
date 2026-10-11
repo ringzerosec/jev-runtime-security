@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! MCP gateway: Ring Zero sits between agents and their remote MCP servers.
 //!
 //! `rz mcp adopt` points each agent's remote MCP servers at

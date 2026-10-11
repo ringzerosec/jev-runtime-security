@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // DiscoveryInventory.tsx — what AI is installed on this machine.
 // Agents, IDE AI extensions, MCP servers and local model runtimes, across all
 // users, with whether enforcement covers each agent. Read-only; driven by

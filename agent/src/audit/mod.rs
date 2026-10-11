@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // audit/mod.rs — Immutable, cryptographically chained audit log
 //
 // Every security event, policy decision, and configuration change is recorded

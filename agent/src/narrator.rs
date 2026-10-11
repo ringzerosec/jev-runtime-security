@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // narrator.rs — live commentary on what agents are doing, in plain sentences.
 //
 // Every event the daemon records passes through `observe` (from

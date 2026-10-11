@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // skill_correlation.rs — Static↔Runtime Correlation Engine (Phase 3)
 //
 // Links SkillSpector static scan findings to runtime kernel syscalls.

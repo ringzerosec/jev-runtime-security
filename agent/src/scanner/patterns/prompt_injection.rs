@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pattern detection: Prompt Injection (P1-P5)
 // Ported from NVIDIA SkillSpector static_patterns_prompt_injection.py
 // and static_patterns_harmful_content.py

@@ -4,11 +4,12 @@ This product includes software developed by Ring Zero Security.
 
 Licensing in this repository is split:
 
-  * Everything outside GPL/ is licensed under the Apache License, Version 2.0.
-    See LICENSE.
+  * Everything outside GPL/ is licensed under the PolyForm Noncommercial
+    License 1.0.0. See LICENSE. Business use needs a commercial license from
+    Ring Zero Security; see COMMERCIAL.md.
   * The contents of GPL/ are licensed under GPL-2.0. See GPL/LICENSE. Linux
     refuses to load a BPF LSM program unless it declares a GPL-compatible
-    license, so the kernel-side code cannot be Apache-2.0.
+    license, so the kernel-side code stays GPL-2.0.
 
 --------------------------------------------------------------------------------
 Credit
@@ -83,7 +84,7 @@ Third-party code REMOVED before publication
 
    An earlier revision of this tree carried YARA rules adapted from
    signature-base. DRL-1.1 is not an OSI-approved open-source license, so those
-   rules were REMOVED rather than shipped inside an Apache-2.0 repository. No
+   rules were REMOVED rather than shipped in this repository. No
    signature-base-derived content remains.
 
 --------------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pattern detection: MCP Tool Poisoning (TP1-TP3)
 // TP4 (Description-Behavior Mismatch) requires LLM analysis — skipped.
 // Patterns derived from pattern_defaults.py definitions.

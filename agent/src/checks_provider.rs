@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //
 // checks_provider.rs — selects and holds the scorer the checks layer uses.
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Single path to the daemon's HTTP API that works in BOTH the packaged Tauri
 // app and the browser-served UI.
 //

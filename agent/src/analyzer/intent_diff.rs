@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // analyzer/intent_diff.rs — Intent–Action correlation engine
 //
 // AgentSight-inspired: correlates the **Intent Stream** (LLM prompts,

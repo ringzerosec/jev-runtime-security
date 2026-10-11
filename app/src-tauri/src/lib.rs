@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ring Zero Security desktop app — Tauri backend.
 //
 // The webview never talks to the daemon directly: every call goes through the

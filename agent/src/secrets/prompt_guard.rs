@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // secrets/prompt_guard.rs — secrets never leave the machine inside a prompt.
 //
 // A developer pastes a log, a config or an .env into an agent prompt and the

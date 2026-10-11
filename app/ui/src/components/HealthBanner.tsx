@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // HealthBanner — global product-health indicator. Polls the daemon's
 // per-subsystem health and surfaces a WARNING/CRITICAL banner the moment a
 // load-bearing piece stops running (kernel enforcement, TLS inspection, the

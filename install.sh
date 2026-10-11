@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ring Zero Security — Linux installer
 #
 # Downloads the latest .deb from GitHub Releases and installs it.

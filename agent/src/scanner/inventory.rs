@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // scanner/inventory.rs — what AI is on this machine.
 //
 // Answers the question a security team asks before any other: which AI agents,

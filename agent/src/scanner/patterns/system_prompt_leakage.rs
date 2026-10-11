@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pattern detection: System Prompt Leakage (P6-P8)
 // Ported from NVIDIA SkillSpector static_patterns_system_prompt_leakage.py
 

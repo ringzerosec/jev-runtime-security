@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // policy/acl.rs — per-skill ACL engine
 
 use crate::common::event::{EventKind, SecurityEvent};

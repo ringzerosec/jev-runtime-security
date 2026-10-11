@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // scanner/osv.rs — OSV.dev vulnerability lookup for package installs
 //
 // Hooks into the eBPF event pipeline: when an agent runs `npm install`,

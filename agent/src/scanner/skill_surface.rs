@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // scanner/skill_surface.rs — enumerate the "skill surface" of every AI coding
 // agent installed on the host.
 //

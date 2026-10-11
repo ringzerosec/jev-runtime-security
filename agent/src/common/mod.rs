@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // common — shared types across all Ring Zero Security crates
 // Referenced by: daemon, ipc, policy, scanner, secrets, analyzer, intel, ui, cli
 

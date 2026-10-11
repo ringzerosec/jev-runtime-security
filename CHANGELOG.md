@@ -7,13 +7,20 @@ project, so the minor version moves for breaking changes.
 
 First public release. Linux only.
 
+### Licensing
+
+- The userspace (daemon, CLI, desktop app, checks, packaging) moves from
+  Apache-2.0 to the PolyForm Noncommercial License 1.0.0: free for individuals
+  and noncommercial organisations, with a commercial license for business use
+  (see COMMERCIAL.md). The kernel-side code in `GPL/` stays GPL-2.0.
+
 ### Two layers
 
 - **Kernel enforcement** (`GPL/bpf`, GPL-2.0) — eBPF LSM programs that refuse
   open, create, delete and rename of protected files for an agent's whole
   process tree. Files are pinned by basename **and** by `(device, inode)`, so
   renames, hardlinks and symlinks reach the same decision.
-- **Checks** (`checks/`, Apache-2.0) — deterministic scorers for tool-call
+- **Checks** (`checks/`, PolyForm Noncommercial 1.0.0) — deterministic scorers for tool-call
   argument risk and sensitive-data exposure. They run off the syscall path on
   harness hook events, return one option from a fixed set with a probability
   and a confidence, and never allow or deny anything. Off by default.

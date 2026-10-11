@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // ProtectedData.tsx — the files and folders no agent may touch.
 //
 // One list, one add field, one-click common protections, and ONE save that asks

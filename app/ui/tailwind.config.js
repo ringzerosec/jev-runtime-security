@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Theme colors are CSS variables holding plain hex values. Wrapping them in
 // color-mix with Tailwind's <alpha-value> placeholder makes opacity suffixes
 // such as bg-primary/5 or bg-muted-foreground/30 work; without it Tailwind

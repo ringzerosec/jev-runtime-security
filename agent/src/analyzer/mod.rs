@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // analyzer — behavioral timeline + anomaly detection + provenance graph.
 // Event history stored in sled (embedded key-value store).
 

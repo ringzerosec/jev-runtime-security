@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // AI agent process detection — canonical agent list for all platforms.
 //
 // Used by daemon event loop (auto-session creation) and proxy (agent traffic identification).

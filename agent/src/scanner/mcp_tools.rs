@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! The tools a remote MCP server offers, for Discovery.
 //!
 //! Asked of the server itself with the standard MCP handshake (initialize, then

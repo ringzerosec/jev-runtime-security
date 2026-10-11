@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // policy/capability.rs — what each agent and each MCP server is allowed to do.
 //
 // A capability profile is a short, human-readable statement attached to one

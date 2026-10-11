@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // api/identity.rs — Agent Identity API (Phase 5)
 //
 // Unified endpoint that surfaces the full agent context for a session:

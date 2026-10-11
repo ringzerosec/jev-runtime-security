@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // commentary.ts — live commentary as text: fetch lines from the daemon and
 // keep the latest few for the captions. Each session's full commentary is on
 // its Commentary tab in Sessions.
