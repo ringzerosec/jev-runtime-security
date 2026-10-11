@@ -14,10 +14,18 @@
 name: release
 
 # Tag a version to publish packages:  git tag v0.1.0 && git push origin v0.1.0
+# Every merge to main also refreshes the "latest" pre-release, so the newest
+# build is always downloadable.
 on:
   push:
     tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
+
+# One "latest" publish at a time; a newer merge replaces an older one in flight.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
 
 permissions:
   contents: write
@@ -40,9 +48,33 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev bpftool \
+          sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev \
             pkg-config libssl-dev dpkg-dev \
             libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+
+      # bpftool generates vmlinux.h for the eBPF build. Ubuntu 24.04 runners have
+      # no bpftool package, and their kernel-tools packages do not ship it, so
+      # take the bpftool project's own static release, pinned and checksummed.
+      - name: Install bpftool (pinned static release)
+        env:
+          BPFTOOL_VERSION: v7.7.0
+          SHA256_amd64: 09150596f09356b0ff632dd7f9856e0ea86bf96b269e9bc94278d9a9432a268c
+          SHA256_arm64: d68443d945c146080151eb215bebaa400294ab7ada22af4f5d0a940f5992b9d9
+        run: |
+          arch=${{ matrix.arch }}
+          # Download outside the checkout, so the build's version is not "dirty".
+          name="bpftool-${BPFTOOL_VERSION}-${arch}.tar.gz"
+          tgz="$RUNNER_TEMP/$name"
+          curl -fsSL -o "$tgz" "https://github.com/libbpf/bpftool/releases/download/${BPFTOOL_VERSION}/${name}"
+          want_var="SHA256_${arch}"
+          echo "${!want_var}  $tgz" | sha256sum -c -
+          git status --porcelain
+          mkdir -p "$RUNNER_TEMP/bpftool"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/bpftool"
+          BPFTOOL=$(find "$RUNNER_TEMP/bpftool" -name bpftool -type f | head -1)
+          chmod +x "$BPFTOOL"
+          "$BPFTOOL" version
+          echo "BPFTOOL=$BPFTOOL" >> "$GITHUB_ENV"
 
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --version '^2' --locked
@@ -63,6 +95,11 @@ jobs:
           cd target/deb
           test -f ringzero-security_*_${{ matrix.arch }}.deb
           test -f ringzero-desktop_*_${{ matrix.arch }}.deb
+          # build-deb.sh skips the eBPF build when the host has no kernel BTF; a
+          # package without the kernel objects would enforce nothing, so refuse it.
+          dpkg -c ringzero-security_*_${{ matrix.arch }}.deb | grep -q 'usr/lib/ringzero/ringzero.bpf.o'
+          dpkg -c ringzero-security_*_${{ matrix.arch }}.deb | grep -q 'usr/lib/ringzero/stdiocap.bpf.o'
+          echo "both eBPF objects are in the package"
           sha256sum *.deb > SHA256SUMS-${{ matrix.arch }}.txt
           cat SHA256SUMS-${{ matrix.arch }}.txt
 
@@ -108,3 +145,36 @@ jobs:
             Verify downloads against `SHA256SUMS-<arch>.txt`. The installer adds
             `bpf` to the GRUB command line and asks for a reboot; until you reboot the
             daemon runs in a degraded, userspace-only mode.
+
+  publish-latest:
+    name: publish latest build
+    needs: deb
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List what is being published
+        run: ls -la dist
+      # The rolling "latest" pre-release is replaced, never edited: deleting it
+      # and its tag first means its files are always exactly this build's.
+      - name: Replace the latest pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/*.deb dist/SHA256SUMS-*.txt \
+            --prerelease \
+            --target "${{ github.sha }}" \
+            --title "Latest build from main" \
+            --notes "The newest build from main (${GITHUB_SHA::7}), rebuilt on every merge. For a stable version, use the newest v* release.
+
+          \`\`\`sh
+          sudo apt install ./ringzero-security_<version>_<arch>.deb
+          sudo apt install ./ringzero-desktop_<version>_<arch>.deb   # optional viewer
+          \`\`\`
+
+          Verify downloads against SHA256SUMS-<arch>.txt."
