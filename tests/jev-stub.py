@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """
 A TEST DOUBLE for the Jev scoring contract. Not a client, not a mock of a real
 service in any production path — it exists so the checks layer can be exercised

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // scanner/supply_chain.rs — supply chain scan pipeline for installed skills/packages
 //
 // Scans for: high entropy (obfuscation), embedded secrets, suspicious patterns.

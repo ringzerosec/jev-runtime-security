@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // policy/network.rs — NetworkMode enforcement
 // low:    only agent-origin process
 // medium: agent + full child process tree

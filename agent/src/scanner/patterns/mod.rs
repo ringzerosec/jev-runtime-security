@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pattern-based security scanner — ported from NVIDIA SkillSpector
 //
 // Provides static regex-based detection across 11 vulnerability categories:

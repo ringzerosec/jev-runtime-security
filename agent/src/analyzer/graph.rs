@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // analyzer/graph.rs — Provenance Graph for SLM RAG context
 //
 // Builds a lightweight in-memory graph from the daemon's live engines

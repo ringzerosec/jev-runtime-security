@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //
 // jev.rs — optional scoring provider backed by TypeSafe's hosted Jev API.
 //

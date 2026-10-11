@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // policy/profile.rs — Layered policy evaluator (4-layer override chain)
 //
 // Policy evaluation layers (lowest to highest priority):

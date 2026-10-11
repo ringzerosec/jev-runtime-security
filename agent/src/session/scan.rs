@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! Running-agent discovery — registers a Session for every live AI-agent process
 //! by scanning `/proc`, independent of LLM traffic.
 //!

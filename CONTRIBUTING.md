@@ -22,7 +22,7 @@ We do not require a CLA for userspace code.
 # Kernel side (GPL-2.0) — needs clang, bpftool, libbpf-dev, and BTF
 make -C GPL/bpf all
 
-# Userspace (Apache-2.0)
+# Userspace (PolyForm Noncommercial 1.0.0)
 cargo build --release
 cargo test --workspace
 cargo fmt --all -- --check
@@ -54,8 +54,8 @@ allow something it should.
 
 The licence split is load-bearing. Do not move BPF source out of `GPL/`, and do
 not embed BPF source into the userspace crates: the kernel will refuse to load
-a BPF LSM program that is not GPL-declared, and the Apache side must stay free
-of GPL source.
+a BPF LSM program that is not GPL-declared, and the PolyForm side must stay
+free of GPL source.
 
 ## Unsafe code
 
@@ -70,3 +70,10 @@ Do not open an issue. Email **security@ringzerosecurity.com** — see
 ## Code of conduct
 
 Participating here means following the [code of conduct](CODE_OF_CONDUCT.md).
+
+## Licensing of contributions
+
+Ring Zero Security licenses the userspace under PolyForm Noncommercial 1.0.0
+and sells commercial licenses to businesses. By submitting a contribution
+outside `GPL/`, you agree that Ring Zero Security may distribute it under both
+of those terms. Contributions to `GPL/` are GPL-2.0.

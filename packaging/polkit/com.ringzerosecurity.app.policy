@@ -3,7 +3,7 @@
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
 <!--
-  SPDX-License-Identifier: Apache-2.0
+  SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
   Why this exists. The desktop app holds the READ-ONLY API token, because an AI
   coding agent runs as the same user and a full-scope token in that user's reach

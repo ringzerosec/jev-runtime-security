@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // session/store.rs — Session lifecycle management (sled-backed)
 //
 // Tracks every AI agent session: PENDING → ACTIVE → WAITING_APPROVAL → EXPIRED / TERMINATED

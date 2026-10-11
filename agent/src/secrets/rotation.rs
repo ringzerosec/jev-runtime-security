@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // secrets/rotation.rs — Secret rotation automation
 //
 // Tracks detected secrets, their age, rotation status, and provides a

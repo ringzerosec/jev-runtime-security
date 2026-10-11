@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // refusals.ts — what a recorded refusal means, in plain words.
 //
 // Everything here is read off the event itself: which agent, what it tried,

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Policy.tsx — one place for what AI on this machine is allowed to do.
 //
 // Every section is a control: something the kernel or the agent hook refuses.

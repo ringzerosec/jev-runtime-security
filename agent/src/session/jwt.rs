@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // session/jwt.rs — Per-session JWT issuance
 //
 // Issues HS256 JWTs scoped to a single Ring Zero session.

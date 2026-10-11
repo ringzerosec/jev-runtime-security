@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 import { runPrivilegedSequence, describeFailure } from '@/lib/privileged';
 import { toast } from './ui/toast';
 import { useState, useEffect, useCallback, useMemo } from 'react';

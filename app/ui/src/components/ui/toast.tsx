@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 import { useState, useEffect, useCallback } from 'react';
 import { cn } from '../../lib/utils';
 import { X, CheckCircle2, AlertTriangle, XCircle, Info } from 'lucide-react';

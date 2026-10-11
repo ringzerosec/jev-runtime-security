@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // policy — ACL engine, network mode, enforce/observe mode, intent-aware
 // policy, per-agent profiles, and user-defined rules.
 

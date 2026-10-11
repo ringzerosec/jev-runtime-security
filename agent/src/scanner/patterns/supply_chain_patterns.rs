@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pattern detection: Supply Chain (SC1-SC3, SC5-SC6, TR1-TR3)
 // Ported from NVIDIA SkillSpector static_patterns_supply_chain.py
 // Note: SC4 (OSV lookup) is handled by the existing osv.rs module.

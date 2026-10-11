@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // analyzer/correlation.rs — Attack Pattern Correlation Engine (Behavior Graph)
 //
 // Detects multi-step attack chains that individual event monitoring misses.

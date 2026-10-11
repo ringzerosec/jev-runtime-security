@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // audit/log.rs — Append-only, hash-chained audit log backed by sled
 
 use std::sync::atomic::{AtomicU64, Ordering};

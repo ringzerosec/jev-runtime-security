@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pattern detection: Data Exfiltration (E1-E4)
 // Ported from NVIDIA SkillSpector static_patterns_data_exfiltration.py
 

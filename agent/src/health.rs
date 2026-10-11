@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! Subsystem health — the single source of truth for "is the product actually
 //! protecting this box right now". The UI renders this so an operator sees a
 //! WARNING/CRITICAL state the moment a load-bearing piece stops running (kernel

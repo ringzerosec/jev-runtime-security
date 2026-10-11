@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // scanner/verified_registry.rs — Ring Zero Verified registry for AI agent packages
 //
 // Tracks installed MCP servers, Claude Code extensions, Cursor plugins etc.

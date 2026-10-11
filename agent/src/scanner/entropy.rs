@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // scanner/entropy.rs — Shannon entropy analysis for obfuscation detection
 
 /// Compute Shannon entropy of a byte slice. Returns a value in [0.0, 8.0].

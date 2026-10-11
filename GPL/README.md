@@ -1,7 +1,7 @@
 # GPL/ — the kernel-side code
 
 Everything in this directory is **GPL-2.0** (see `GPL/LICENSE`). The rest of
-the repository is Apache-2.0.
+the repository is under PolyForm Noncommercial 1.0.0.
 
 This split is not a preference. Linux refuses to load a BPF LSM program unless
 it declares a GPL-compatible license, because these programs call GPL-only
@@ -9,7 +9,7 @@ kernel helpers. So `ringzero.bpf.c` declares `char LICENSE[] SEC("license") =
 "GPL";` and carries an SPDX GPL-2.0 header, and it lives in its own directory
 so the boundary is a directory boundary rather than a comment somebody has to
 notice. The userspace loader links **compiled objects** only; no BPF source is
-compiled into the Apache side.
+compiled into the PolyForm side.
 
 ## What the programs do
 

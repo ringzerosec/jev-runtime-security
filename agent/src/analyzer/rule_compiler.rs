@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // analyzer/rule_compiler.rs — the judgment→rule compiler (the keystone).
 //
 // The slow on-device SLM (L2) reasons over a provenance graph and emits exactly

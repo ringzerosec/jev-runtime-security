@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // threatCategories.ts — the names of the threat categories a classifier puts
 // on recorded events. These are labels for triage, not settings: what gets
 // refused is decided by the controls on the Policy screen.

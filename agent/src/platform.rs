@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // platform.rs — helpers for OS-level queries
 
 /// Returns true if the current process is running as root.

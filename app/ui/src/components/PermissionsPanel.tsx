@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // PermissionsPanel.tsx — what each agent and MCP server may reach and run.
 //
 // Every agent Discovery found is listed, whether or not it has limits yet.
