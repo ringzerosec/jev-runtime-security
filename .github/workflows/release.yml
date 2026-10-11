@@ -63,8 +63,9 @@ jobs:
         run: |
           arch=${{ matrix.arch }}
           # Download outside the checkout, so the build's version is not "dirty".
-          tgz="$RUNNER_TEMP/bpftool-${BPFTOOL_VERSION}-${arch}.tar.gz"
-          curl -fsSL -o "$tgz" "https://github.com/libbpf/bpftool/releases/download/${BPFTOOL_VERSION}/${tgz}"
+          name="bpftool-${BPFTOOL_VERSION}-${arch}.tar.gz"
+          tgz="$RUNNER_TEMP/$name"
+          curl -fsSL -o "$tgz" "https://github.com/libbpf/bpftool/releases/download/${BPFTOOL_VERSION}/${name}"
           want_var="SHA256_${arch}"
           echo "${!want_var}  $tgz" | sha256sum -c -
           git status --porcelain
