@@ -56,7 +56,10 @@ jobs:
           # on tools for the exact running kernel.
           sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)" \
             || sudo apt-get install -y linux-tools-common linux-tools-generic
-          BPFTOOL=$(ls /usr/lib/linux-tools/*/bpftool | head -1)
+          # Ubuntu installs it under /usr/lib/linux-tools-<version>/ (and a
+          # per-flavour directory of symlinks); search rather than guess.
+          BPFTOOL=$(find /usr/lib -path '*linux-tools*' -name bpftool \( -type f -o -type l \) 2>/dev/null | head -1)
+          echo "bpftool: $BPFTOOL"
           test -x "$BPFTOOL"
           "$BPFTOOL" version
           echo "BPFTOOL=$BPFTOOL" >> "$GITHUB_ENV"
