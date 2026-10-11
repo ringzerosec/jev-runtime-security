@@ -51,16 +51,25 @@ jobs:
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev \
             pkg-config libssl-dev dpkg-dev \
             libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-          # Ubuntu 24.04 has no standalone bpftool package: it ships with the
-          # kernel tools. Use the binary directly; the /usr/sbin wrapper insists
-          # on tools for the exact running kernel.
-          sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)" \
-            || sudo apt-get install -y linux-tools-common linux-tools-generic
-          # Ubuntu installs it under /usr/lib/linux-tools-<version>/ (and a
-          # per-flavour directory of symlinks); search rather than guess.
-          BPFTOOL=$(find /usr/lib -path '*linux-tools*' -name bpftool \( -type f -o -type l \) 2>/dev/null | head -1)
-          echo "bpftool: $BPFTOOL"
-          test -x "$BPFTOOL"
+
+      # bpftool generates vmlinux.h for the eBPF build. Ubuntu 24.04 runners have
+      # no bpftool package, and their kernel-tools packages do not ship it, so
+      # take the bpftool project's own static release, pinned and checksummed.
+      - name: Install bpftool (pinned static release)
+        env:
+          BPFTOOL_VERSION: v7.7.0
+          SHA256_amd64: 09150596f09356b0ff632dd7f9856e0ea86bf96b269e9bc94278d9a9432a268c
+          SHA256_arm64: d68443d945c146080151eb215bebaa400294ab7ada22af4f5d0a940f5992b9d9
+        run: |
+          arch=${{ matrix.arch }}
+          tgz="bpftool-${BPFTOOL_VERSION}-${arch}.tar.gz"
+          curl -fsSL -o "$tgz" "https://github.com/libbpf/bpftool/releases/download/${BPFTOOL_VERSION}/${tgz}"
+          want_var="SHA256_${arch}"
+          echo "${!want_var}  $tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bpftool"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/bpftool"
+          BPFTOOL=$(find "$RUNNER_TEMP/bpftool" -name bpftool -type f | head -1)
+          chmod +x "$BPFTOOL"
           "$BPFTOOL" version
           echo "BPFTOOL=$BPFTOOL" >> "$GITHUB_ENV"
 
@@ -83,6 +92,11 @@ jobs:
           cd target/deb
           test -f ringzero-security_*_${{ matrix.arch }}.deb
           test -f ringzero-desktop_*_${{ matrix.arch }}.deb
+          # build-deb.sh skips the eBPF build when the host has no kernel BTF; a
+          # package without the kernel objects would enforce nothing, so refuse it.
+          dpkg -c ringzero-security_*_${{ matrix.arch }}.deb | grep -q 'usr/lib/ringzero/ringzero.bpf.o'
+          dpkg -c ringzero-security_*_${{ matrix.arch }}.deb | grep -q 'usr/lib/ringzero/stdiocap.bpf.o'
+          echo "both eBPF objects are in the package"
           sha256sum *.deb > SHA256SUMS-${{ matrix.arch }}.txt
           cat SHA256SUMS-${{ matrix.arch }}.txt
 
