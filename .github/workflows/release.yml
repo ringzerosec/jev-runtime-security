@@ -13,7 +13,7 @@
 # it, because a SHA from a different branch would silently change the channel.
 name: release
 
-# Tag a version to publish packages:  git tag v0.1.0 && git push origin v0.1.0
+# Tag a version to publish packages:  git tag v0.2.0 && git push origin v0.2.0   (must match VERSION)
 # Every merge to main also refreshes the "latest" pre-release, so the newest
 # build is always downloadable.
 on:
