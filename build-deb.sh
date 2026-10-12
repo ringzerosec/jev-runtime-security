@@ -22,19 +22,37 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_VERSION=$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION" 2>/dev/null || grep '^version' "$SCRIPT_DIR/Cargo.toml" | head -1 | awk -F'"' '{print $2}' || echo "0.1.0")
 
-# A BUILD IDENTIFIER, so an upgrade is never a silent no-op.
+# THE PACKAGE VERSION.
 #
-# Both control files carried a static 0.1.0, so apt compared the new package
-# against the installed one, found the same version, and reported "already the
-# newest version" while the tester kept running old code. That is how a stale
-# interface reached a tester. The suffix is the commit and a UTC timestamp, and
-# dpkg orders it after a bare 0.1.0, so every build is an upgrade.
-BUILD_ID="$(git -C "$SCRIPT_DIR" rev-parse --short=8 HEAD 2>/dev/null || echo nogit)"
-BUILD_STAMP="$(date -u +%Y%m%d%H%M%S)"
-if [ -n "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null)" ]; then
-  BUILD_ID="${BUILD_ID}dirty"
+#   tag build (v0.2.0)   0.2.0           the release; the tag must match VERSION
+#   CI build from main   0.2.0+main.57   57 is the workflow run number
+#   local build          0.2.0+local.20261012083000
+#
+# Builds that are not a release carry a suffix so an upgrade is never a silent
+# no-op: with a bare version apt finds the same number installed, reports
+# "already the newest version" and the tester keeps running old code. dpkg
+# orders every suffix after the bare version, and later runs after earlier ones.
+# The CI suffix comes from the run, not the runner's clock, so both
+# architectures of one build carry the same version.
+TAG="$(git -C "$SCRIPT_DIR" describe --exact-match --tags HEAD 2>/dev/null || true)"
+if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+  TAG="${GITHUB_REF_NAME}"
 fi
-VERSION="${BASE_VERSION}+${BUILD_STAMP}.g${BUILD_ID}"
+if [ -n "$TAG" ] && [ "$TAG" != "latest" ]; then
+  if [ "$TAG" != "v${BASE_VERSION}" ]; then
+    echo "[!] Tag ${TAG} does not match VERSION ${BASE_VERSION}" >&2
+    exit 1
+  fi
+  if [ -n "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null)" ]; then
+    echo "[!] Refusing to build release ${TAG} from a modified tree" >&2
+    exit 1
+  fi
+  VERSION="${BASE_VERSION}"
+elif [ -n "${GITHUB_RUN_NUMBER:-}" ]; then
+  VERSION="${BASE_VERSION}+main.${GITHUB_RUN_NUMBER}"
+else
+  VERSION="${BASE_VERSION}+local.$(date -u +%Y%m%d%H%M%S)"
+fi
 echo "[+] Build version: ${VERSION}"
 
 DAEMON_ONLY=0

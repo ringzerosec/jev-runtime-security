@@ -433,7 +433,7 @@ async fn get_status() -> Result<DaemonStatus, String> {
             version: s["version"]
                 .as_str()
                 .map(|v| v.to_string())
-                .or_else(|| Some("0.1.0".to_string())),
+                .or_else(|| Some(env!("CARGO_PKG_VERSION").to_string())),
             uptime: s["uptime"].as_u64(),
             threats_blocked: s["threats_blocked"].as_u64(),
             skills_monitored: s["skills_monitored"].as_u64(),
